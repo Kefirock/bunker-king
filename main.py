@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from src.config import cfg
 from src.utils import GameSetup
@@ -21,18 +22,36 @@ from src.services.judge import JudgeService
 from src.services.director import DirectorEngine
 from src.logger_service import game_logger
 
+# Загрузка переменных окружения
 load_dotenv(os.path.join("Configs", ".env"))
 
+# Инициализация сервисов
 bot_engine = BotEngine()
 judge_service = JudgeService()
 director_engine = DirectorEngine()
 
-bot = Bot(token=os.getenv("BOT_TOKEN"))
+# Настройка бота и прокси
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PROXY_URL = os.getenv("PROXY_URL")
+
+if not BOT_TOKEN:
+    print("❌ ERROR: BOT_TOKEN is missing in Configs/.env")
+    sys.exit(1)
+
+if PROXY_URL:
+    print(f"📡 Using Proxy: {PROXY_URL}")
+    session = AiohttpSession(proxy=PROXY_URL)
+    bot = Bot(token=BOT_TOKEN, session=session)
+else:
+    print("📡 Direct connection (No Proxy)")
+    bot = Bot(token=BOT_TOKEN)
+
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
 
+# FSM Состояния
 class GameFSM(StatesGroup):
     Lobby = State()
     GameLoop = State()
@@ -40,56 +59,70 @@ class GameFSM(StatesGroup):
     Voting = State()
 
 
-# --- UTILS ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
 def get_topic_for_round_base(round_num: int, trait: str = "", catastrophe_data: dict = None) -> str:
+    """Возвращает базовую тему раунда (для фазы презентации)"""
     topics_cfg = cfg.gameplay["rounds"]["topics"]
     if round_num == 1:
         return topics_cfg[1]
     elif round_num == 2:
         return topics_cfg[2].format(trait=trait)
     else:
+        # Для 3+ раунда берем случайную проблему из сценария
         if catastrophe_data and "topics" in catastrophe_data:
+            # Берем проблему по модулю, чтобы не выйти за границы списка
             idx = (round_num - 3) % len(catastrophe_data["topics"])
-            return topics_cfg[3].format(catastrophe_problem=catastrophe_data["topics"][idx])
-        return "ВЫЖИВАНИЕ."
+            problem = catastrophe_data["topics"][idx]
+            return topics_cfg[3].format(catastrophe_problem=problem)
+        return "ВЫЖИВАНИЕ. Докажи свою пользу."
 
 
 def get_display_topic(gs: GameState, player_trait: str = "", catastrophe_data: dict = None) -> str:
+    """
+    Возвращает текст, который видит игрок в зависимости от текущей фазы.
+    """
     if gs.phase == "presentation":
         return get_topic_for_round_base(gs.round, player_trait, catastrophe_data)
     elif gs.phase == "discussion":
         return "ОБСУЖДЕНИЕ. Кто лишний? Назови имя того, против кого будешь голосовать, и объясни почему."
     elif gs.phase == "runoff":
-        return f"ПЕРЕСТРЕЛКА. {', '.join(gs.runoff_candidates)} на грани вылета. Докажи, что ты полезнее."
+        candidates_str = ", ".join(gs.runoff_candidates)
+        return f"ПЕРЕСТРЕЛКА. {candidates_str} на грани вылета. Докажи, что ты полезнее."
     return "..."
 
 
-# --- HANDLERS ---
+# --- ОБРАБОТЧИКИ (HANDLERS) ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
     await message.answer("<b>BUNKER 2.5: WEIGHTED DECISIONS</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+    await state.set_state(GameFSM.Lobby)
 
 
 @router.callback_query(F.data == "start_game")
 async def start_game_handler(callback: CallbackQuery, state: FSMContext):
     user_name = callback.from_user.first_name
 
+    # Новая сессия логов
     game_logger.new_session(user_name)
     game_logger.log_game_event("SYSTEM", f"New game started for user: {user_name}")
 
+    # Генерация игроков и состояния
     players = GameSetup.generate_players(user_name)
     game_state = GameSetup.init_game_state()
     game_state.topic = get_topic_for_round_base(1)
 
-    current_catastrophe = cfg.scenarios["catastrophes"][0]
+    # Поиск сценария (катастрофы)
+    current_catastrophe = cfg.scenarios["catastrophes"][0]  # Fallback
     for cat in cfg.scenarios["catastrophes"]:
         if cat["name"] in game_state.topic:
             current_catastrophe = cat
             break
 
+    # Сохраняем в FSM
     await state.update_data(
         players=[p.model_dump() for p in players],
         game_state=game_state.model_dump(),
@@ -97,10 +130,12 @@ async def start_game_handler(callback: CallbackQuery, state: FSMContext):
         current_turn_index=0
     )
 
+    # Интро
     intro = f"🌍 <b>СЦЕНАРИЙ:</b> {current_catastrophe['name']}\n\n👥 <b>ИГРОКИ:</b>\n"
     for p in players:
         role = p.profession if p.is_human else "???"
         intro += f"- {p.name}: {role}\n"
+        # Логируем скрытые данные для дебага
         game_logger.log_game_event("SYSTEM", "Player Created",
                                    {"name": p.name, "profession": p.profession, "trait": p.trait,
                                     "is_human": p.is_human})
@@ -113,7 +148,10 @@ async def start_round(chat_id: int, state: FSMContext):
     data = await state.get_data()
     gs = GameState(**data["game_state"])
 
+    # Сброс фазы на презентацию
     gs.phase = "presentation"
+
+    # Тема раунда (общая)
     base_topic = get_topic_for_round_base(gs.round, trait="...", catastrophe_data=data.get("catastrophe"))
     gs.topic = base_topic
 
@@ -126,17 +164,20 @@ async def start_round(chat_id: int, state: FSMContext):
 
 
 async def process_turn(chat_id: int, state: FSMContext):
+    """Главный цикл хода"""
     data = await state.get_data()
     players = [PlayerProfile(**p) for p in data["players"]]
     gs = GameState(**data["game_state"])
     idx = data["current_turn_index"]
     cat_data = data.get("catastrophe", {})
 
+    # 1. Определяем список активных игроков (кто ходит в этой фазе)
     if gs.phase == "runoff":
         active_players_list = [p for p in players if p.name in gs.runoff_candidates]
     else:
         active_players_list = players
 
+    # 2. Если все походили -> Смена фазы
     if idx >= len(active_players_list):
         if gs.phase == "presentation":
             gs.phase = "discussion"
@@ -164,39 +205,50 @@ async def process_turn(chat_id: int, state: FSMContext):
             await start_voting(chat_id, state)
             return
 
+    # 3. Ход текущего игрока
     current_player = active_players_list[idx]
 
+    # Актуальный топик (нужен для подстановки черты, если это раунд 2)
     actual_topic = get_display_topic(gs, player_trait=current_player.trait, catastrophe_data=cat_data)
+
+    # Временный стейт для передачи в LLM
     temp_gs = gs.model_copy()
     temp_gs.topic = actual_topic
 
     if current_player.is_human:
+        # Ход человека
         await bot.send_message(chat_id, f"👤 <b>Твой ход</b>:\n{actual_topic}", parse_mode="HTML")
         game_logger.log_game_event("HUMAN_TURN", f"User {current_player.name} is making a move. Phase: {gs.phase}")
         await state.update_data(game_state=gs.model_dump())
         await state.set_state(GameFSM.HumanTurn)
         return
     else:
+        # Ход бота
         await bot.send_chat_action(chat_id, "typing")
 
+        # Директор дает скрытую инструкцию (находит козла отпущения)
         instr = await director_engine.get_hidden_instruction(current_player, players, temp_gs)
         game_logger.log_game_event("DIRECTOR", f"Director instruction for {current_player.name}",
                                    {"instruction": instr if instr else "None"})
 
+        # Бот генерирует речь
         speech = await bot_engine.make_turn(current_player, players, temp_gs, director_instruction=instr)
         await bot.send_message(chat_id, f"🤖 <b>{current_player.name}</b>:\n{speech}", parse_mode="HTML")
+
         game_logger.log_chat_message(current_player.name, speech)
         game_logger.log_game_event("BOT_SPEECH", f"{current_player.name} spoke.", {"speech": speech, "phase": gs.phase})
 
+        # Судья анализирует и раздает ярлыки (теги)
         verdict = await judge_service.analyze_move(current_player, speech, actual_topic)
 
-        # Обновляем счет из вердикта (полный пересчет)
+        # Обновляем счетчик подозрений
         current_player.suspicion_score = verdict["total_suspicion"]
 
         game_logger.log_game_event("JUDGE", f"Verdict for {current_player.name}",
-                                   {"score": verdict['score'], "total": verdict['total_suspicion'],
+                                   {"score_delta": verdict['score'], "total": verdict['total_suspicion'],
                                     "type": verdict['type'], "comment": verdict['comment']})
 
+        # Обновляем статус (для красоты и других ботов)
         thresholds = cfg.gameplay["judge"]["status_thresholds"]
         if current_player.suspicion_score >= thresholds["impostor"]:
             current_player.status = "IMPOSTOR"
@@ -209,22 +261,25 @@ async def process_turn(chat_id: int, state: FSMContext):
 
         gs.history.append(f"[{current_player.name}]: {speech}")
 
+        # Сохраняем
         data["players"] = [p.model_dump() for p in players]
         data["game_state"] = gs.model_dump()
         data["current_turn_index"] += 1
 
         await state.update_data(data)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.5)  # Пауза для реализма
         await process_turn(chat_id, state)
 
 
 @router.message(GameFSM.HumanTurn)
 async def human_turn_handler(message: Message, state: FSMContext):
+    """Обработка ответа человека"""
     data = await state.get_data()
     players = [PlayerProfile(**p) for p in data["players"]]
     gs = GameState(**data["game_state"])
     cat_data = data.get("catastrophe", {})
 
+    # Находим правильного игрока в списке
     if gs.phase == "runoff":
         active_list = [p for p in players if p.name in gs.runoff_candidates]
     else:
@@ -239,13 +294,14 @@ async def human_turn_handler(message: Message, state: FSMContext):
     game_logger.log_game_event("HUMAN_SPEECH", f"User {player.name} spoke.",
                                {"speech": message.text, "phase": gs.phase})
 
+    # Судья анализирует человека
     verdict = await judge_service.analyze_move(player, message.text, actual_topic)
 
     player.suspicion_score = verdict["total_suspicion"]
 
     game_logger.log_game_event("JUDGE", f"Verdict for {player.name}",
-                               {"score": verdict['score'], "total": verdict['total_suspicion'], "type": verdict['type'],
-                                "comment": verdict['comment']})
+                               {"score_delta": verdict['score'], "total": verdict['total_suspicion'],
+                                "type": verdict['type'], "comment": verdict['comment']})
 
     thresholds = cfg.gameplay["judge"]["status_thresholds"]
     if player.suspicion_score >= thresholds["impostor"]:
@@ -259,6 +315,7 @@ async def human_turn_handler(message: Message, state: FSMContext):
 
     gs.history.append(f"[{player.name}]: {message.text}")
 
+    # Обновляем объект игрока в общем списке
     for i, p in enumerate(players):
         if p.name == player.name:
             players[i] = player
@@ -272,6 +329,8 @@ async def human_turn_handler(message: Message, state: FSMContext):
     await state.set_state(GameFSM.GameLoop)
     await process_turn(message.chat.id, state)
 
+
+# --- ГОЛОСОВАНИЕ ---
 
 async def start_voting(chat_id: int, state: FSMContext):
     data = await state.get_data()
@@ -287,6 +346,7 @@ async def start_voting(chat_id: int, state: FSMContext):
 
     kb = InlineKeyboardBuilder()
     for p in targets:
+        # Проверка allow_self_vote из конфига
         if not p.is_human or cfg.gameplay["voting"]["allow_self_vote"]:
             kb.add(InlineKeyboardButton(text=f"☠ {p.name}", callback_data=f"vote_{p.name}"))
     kb.adjust(1)
@@ -308,6 +368,7 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_reply_markup(reply_markup=None)
 
+    # Определяем пул кандидатов
     if gs.runoff_candidates:
         valid_targets_objs = [p for p in players if p.name in gs.runoff_candidates]
     else:
@@ -316,6 +377,7 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
     votes = [target_name]
     game_logger.log_game_event("VOTE", f"Human {callback.from_user.first_name} voted for {target_name}")
 
+    # Голоса ботов
     for bot_p in players:
         if not bot_p.is_human:
             vote = await bot_engine.make_vote(bot_p, valid_targets_objs, gs)
@@ -332,6 +394,7 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
     game_logger.log_game_event("VOTE_RESULTS", "Voting results calculated",
                                {"counts": dict(counts), "leaders": leaders})
 
+    # Сценарий Ничьей (Runoff)
     if len(leaders) > 1:
         max_runoffs = cfg.gameplay["voting"]["max_runoffs"]
         if gs.runoff_count >= max_runoffs:
@@ -355,6 +418,7 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
         await process_turn(chat_id, state)
         return
 
+    # Есть победитель
     await callback.message.answer(f"{result_text}🚪 <b>{leader_name}</b> изгнан.", parse_mode="HTML")
     game_logger.log_game_event("SYSTEM", "Player eliminated.", {"loser": leader_name})
     await eliminate_player(leader_name, chat_id, state)
@@ -387,6 +451,7 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
     gs.runoff_count = 0
     gs.round += 1
 
+    # Новый раунд
     cat_data = data.get("catastrophe", {})
     new_topic = get_topic_for_round_base(gs.round, trait="...", catastrophe_data=cat_data)
     gs.topic = new_topic
@@ -401,6 +466,7 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
 
 
 async def main():
+    # Удаляем вебхук и запускаем поллинг
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

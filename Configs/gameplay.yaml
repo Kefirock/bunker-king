@@ -1,0 +1,87 @@
+# --- СТРУКТУРА РАУНДОВ ---
+rounds:
+  target_survivors: 3
+
+  topics:
+    1: "ПРЕДСТАВЛЕНИЕ. Назови свою профессию и докажи, что ты полезен."
+    2: "РАСКРЫТИЕ ЧЕРТЫ. У тебя есть особенность: '{trait}'. Расскажи о её происхождении."
+    3: "ПРОБЛЕМА. {catastrophe_problem}"
+
+# --- ФАЗЫ ХОДА ---
+phases:
+  presentation:
+    instruction: "Кратко ответь на вопрос темы раунда. Презентуй себя. Не нападай на других."
+  discussion:
+    instruction: "ФАЗА ОБСУЖДЕНИЯ И КРИТИКИ. Вспомни, что другие отвечали на тему раунда. Кто ответил странно? Кто бесполезен? Твоя главная цель — объяснить, против кого ты планируешь голосовать. Ты можешь искать поддержку у сильных игроков, но это вторично."
+  runoff:
+    instruction: "Это НИЧЬЯ. Игнорируй всех, кроме своего оппонента. Докажи, что ТЫ должен остаться, а ОН — уйти."
+
+# --- ЛОГИКА ПРИНЯТИЯ РЕШЕНИЙ (NEW) ---
+decision_logic:
+  # Базовый вес опасности (Threat Score).
+  # Накапливается в профиле игрока.
+  factors:
+    biohazard: 100     # Вирус, болезнь (Критично)
+    threat: 80         # Оружие, агрессия
+    liar: 60           # Доказанная ложь
+    useless: 40        # Бесполезная профессия
+    weird: 25          # Бред (off_topic)
+    lore_break: 50     # Метагейминг
+
+  # Сила оправдания
+  mitigation:
+    strong_argument: 0.5   # Снижает накопленную угрозу на 50%
+    weak_argument: 0.9     # Снижает на 10%
+    bad_argument: 1.2      # Увеличивает угрозу на 20%
+
+# --- ПРАВИЛА ГОЛОСОВАНИЯ ---
+voting:
+  allow_self_vote: false
+  max_runoffs: 1
+
+# --- НАСТРОЙКИ ТУМАНА ВОЙНЫ ---
+visibility:
+  round_1:
+    show_trait: false
+    show_status: false
+  round_2:
+    show_trait: true
+    show_status: true
+  round_3:
+    show_trait: true
+    show_status: true
+
+# --- НАСТРОЙКИ СУДЬИ ---
+judge:
+  strictness: 1.0
+  status_thresholds:
+    suspicious: 20
+    liar: 60
+    impostor: 100
+  weights:
+    # Эти веса используются для расчета мгновенного штрафа в логах,
+    # но основная логика теперь в decision_logic
+    contradiction: 10
+    lore_break: 15
+    off_topic: 12
+    useless: 10
+    omission: 0
+    evasiveness: 5
+
+# --- ПСИХОЛОГИЯ БОТОВ ---
+bots:
+  memory_depth: 15
+  suspicion_decay: 0   # Факторы (грехи) не забываются, пока их не оправдают
+
+  word_limits:
+    min: 30
+    max: 90
+
+  thresholds:
+    question: 15
+    attack: 40
+
+# --- НАСТРОЙКИ ДИРЕКТОРА ---
+director:
+  chaos_level: 5
+  inject_chance: 0.4

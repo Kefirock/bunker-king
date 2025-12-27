@@ -13,6 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiohttp import web  # <--- НОВЫЙ ИМПОРТ
 
 from src.config import cfg
 from src.utils import GameSetup
@@ -22,7 +23,7 @@ from src.services.judge import JudgeService
 from src.services.director import DirectorEngine
 from src.logger_service import game_logger
 
-# Загрузка переменных окружения
+# Загрузка переменных окружения (локально)
 load_dotenv(os.path.join("Configs", ".env"))
 
 # Инициализация сервисов
@@ -35,7 +36,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 PROXY_URL = os.getenv("PROXY_URL")
 
 if not BOT_TOKEN:
-    print("❌ ERROR: BOT_TOKEN is missing in Configs/.env")
+    print("❌ ERROR: BOT_TOKEN is missing in Configs/.env or Environment Variables")
     sys.exit(1)
 
 if PROXY_URL:
@@ -57,6 +58,27 @@ class GameFSM(StatesGroup):
     GameLoop = State()
     HumanTurn = State()
     Voting = State()
+
+
+# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+async def health_check(request):
+    """Просто возвращает 200 OK, чтобы Render знал, что мы живы"""
+    return web.Response(text="Bunker Bot is running!")
+
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    # Render передает порт через переменную окружения PORT
+    # Локально будет использоваться 8080
+    port = int(os.getenv("PORT", 8080))
+
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🌐 Dummy server started on port {port}")
 
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
@@ -466,6 +488,9 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
 
 
 async def main():
+    # Запускаем фейковый веб-сервер (чтобы Render не убил бота на Free Tier)
+    await start_dummy_server()
+
     # Удаляем вебхук и запускаем поллинг
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

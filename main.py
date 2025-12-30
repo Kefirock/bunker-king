@@ -15,7 +15,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
-from aiohttp import web, ClientTimeout
+from aiohttp import web
 from aiogram.exceptions import TelegramNetworkError
 
 # Импортируем обновленный менеджер
@@ -31,7 +31,6 @@ from src.logger_service import game_logger
 load_dotenv(os.path.join("Configs", ".env"))
 
 # --- DNS FIX (Управляемый через ENV) ---
-# На Koyeb ENABLE_DNS_FIX ставить НЕ нужно (или ставить false)
 if os.getenv("ENABLE_DNS_FIX", "false").lower() == "true":
     try:
         import dns.resolver
@@ -94,7 +93,6 @@ async def start_dummy_server():
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Koyeb автоматически выставляет переменную PORT
     port = int(os.getenv("PORT", 7860))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -379,7 +377,6 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
 
 # --- ЗАПУСК ---
 async def main():
-    # 1. Запуск dummy-сервера для Health Checks хостинга
     await start_dummy_server()
     global bot
 
@@ -388,7 +385,6 @@ async def main():
         print("❌ ERROR: BOT_TOKEN is missing")
         return
 
-    # 2. Проверяем настройки прокси через ENV
     enable_proxy = os.getenv("ENABLE_PROXY", "false").lower() == "true"
 
     proxy_manager = None
@@ -402,25 +398,20 @@ async def main():
 
     while True:
         session = None
-        # Увеличиваем таймаут для стабильности
-        timeout = ClientTimeout(total=60, connect=20)
-
         current_proxy = None
 
-        # 3. Логика выбора прокси (только если включено)
         if enable_proxy and proxy_manager:
             current_proxy = proxy_manager.get_next_proxy()
             if current_proxy:
                 print(f"📡 Connecting via SOCKS5: {current_proxy}")
-                session = AiohttpSession(proxy=current_proxy, timeout=timeout)
+                # Убрали явную настройку timeout, чтобы aiogram использовал стандартные значения
+                session = AiohttpSession(proxy=current_proxy)
             else:
-                print("⚠️ No proxies available in list. Trying direct connection fallback.")
-                session = AiohttpSession(timeout=timeout)
+                print("⚠️ No proxies available. Using direct connection.")
+                session = AiohttpSession()
         else:
-            # Прямое соединение
-            session = AiohttpSession(timeout=timeout)
+            session = AiohttpSession()
 
-        # Создаем бота с новой сессией
         bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
 
         try:
@@ -433,7 +424,6 @@ async def main():
 
             if enable_proxy:
                 print("🔄 Switching to next proxy...")
-                # Цикл while True перейдет на следующую итерацию
             else:
                 print("⏳ Connection failed. Retrying in 5s...")
                 await asyncio.sleep(5)

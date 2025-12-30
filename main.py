@@ -30,34 +30,38 @@ from src.logger_service import game_logger
 
 load_dotenv(os.path.join("Configs", ".env"))
 
-# --- DNS FIX (Оставляем на случай, если прокси отвалятся и бот пойдет напрямую) ---
-try:
-    import dns.resolver
+# --- DNS FIX (Управляемый через ENV) ---
+# На Koyeb ENABLE_DNS_FIX ставить НЕ нужно (или ставить false)
+if os.getenv("ENABLE_DNS_FIX", "false").lower() == "true":
+    try:
+        import dns.resolver
 
-    original_getaddrinfo = socket.getaddrinfo
+        original_getaddrinfo = socket.getaddrinfo
 
 
-    def global_dns_patch(host, port, family=0, type=0, proto=0, flags=0):
-        try:
-            if host in ["localhost", "127.0.0.1", "0.0.0.0"]:
+        def global_dns_patch(host, port, family=0, type=0, proto=0, flags=0):
+            try:
+                if host in ["localhost", "127.0.0.1", "0.0.0.0"]:
+                    return original_getaddrinfo(host, port, family, type, proto, flags)
+            except:
+                pass
+            try:
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+                answer = resolver.resolve(host, 'A')
+                ip_list = [r.to_text() for r in answer]
+                selected_ip = random.choice(ip_list)
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (selected_ip, port))]
+            except:
                 return original_getaddrinfo(host, port, family, type, proto, flags)
-        except:
-            pass
-        try:
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-            answer = resolver.resolve(host, 'A')
-            ip_list = [r.to_text() for r in answer]
-            selected_ip = random.choice(ip_list)
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (selected_ip, port))]
-        except:
-            return original_getaddrinfo(host, port, family, type, proto, flags)
 
 
-    socket.getaddrinfo = global_dns_patch
-    print("🔧 DNS Patch applied (Backup for direct connection)")
-except ImportError:
-    print("⚠️ dnspython not found, DNS patch skipped")
+        socket.getaddrinfo = global_dns_patch
+        print("🔧 DNS Patch applied (Backup for direct connection)")
+    except ImportError:
+        print("⚠️ dnspython not found, DNS patch skipped")
+else:
+    print("✅ DNS Patch disabled (Standard System Resolver used)")
 # -------------------------------------------------------------------------------
 
 # Инициализация сервисов
@@ -82,7 +86,7 @@ class GameFSM(StatesGroup):
 
 # --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ---
 async def health_check(request):
-    return web.Response(text="Bunker SOCKS5 Bot is alive")
+    return web.Response(text="Bunker Bot is alive")
 
 
 async def start_dummy_server():
@@ -90,6 +94,7 @@ async def start_dummy_server():
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
+    # Koyeb автоматически выставляет переменную PORT
     port = int(os.getenv("PORT", 7860))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -126,7 +131,7 @@ def get_display_topic(gs: GameState, player_trait: str = "", catastrophe_data: d
 async def cmd_start(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
-    await message.answer("<b>BUNKER 3.0: SOCKS5 EDITION</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+    await message.answer("<b>BUNKER 3.0</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
 
 
@@ -372,8 +377,9 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
     await start_round(chat_id, state)
 
 
-# --- ЗАПУСК С РОТАЦИЕЙ SOCKS5 ---
+# --- ЗАПУСК ---
 async def main():
+    # 1. Запуск dummy-сервера для Health Checks хостинга
     await start_dummy_server()
     global bot
 
@@ -382,25 +388,36 @@ async def main():
         print("❌ ERROR: BOT_TOKEN is missing")
         return
 
-    # 1. Загружаем список SOCKS5 прокси
-    proxy_manager = ProxyManager("proxies.txt")
+    # 2. Проверяем настройки прокси через ENV
+    enable_proxy = os.getenv("ENABLE_PROXY", "false").lower() == "true"
 
-    print("🚀 Starting Bot Loop with SOCKS5 Proxy Rotation...")
+    proxy_manager = None
+    if enable_proxy:
+        print("🚀 Proxy Mode: ENABLED. Loading proxies.txt...")
+        proxy_manager = ProxyManager("proxies.txt")
+    else:
+        print("🚀 Proxy Mode: DISABLED. Using direct connection.")
+
+    print("🚀 Starting Bot Loop...")
 
     while True:
-        # Берем следующий прокси из списка
-        current_proxy = proxy_manager.get_next_proxy()
-
         session = None
-        # Увеличиваем таймаут для прокси
+        # Увеличиваем таймаут для стабильности
         timeout = ClientTimeout(total=60, connect=20)
 
-        if current_proxy:
-            print(f"📡 Attempting connection via SOCKS5: {current_proxy}")
-            # aiohttp-socks распознает socks5:// автоматически
-            session = AiohttpSession(proxy=current_proxy, timeout=timeout)
+        current_proxy = None
+
+        # 3. Логика выбора прокси (только если включено)
+        if enable_proxy and proxy_manager:
+            current_proxy = proxy_manager.get_next_proxy()
+            if current_proxy:
+                print(f"📡 Connecting via SOCKS5: {current_proxy}")
+                session = AiohttpSession(proxy=current_proxy, timeout=timeout)
+            else:
+                print("⚠️ No proxies available in list. Trying direct connection fallback.")
+                session = AiohttpSession(timeout=timeout)
         else:
-            print("📡 Direct connection (using DNS Patch)")
+            # Прямое соединение
             session = AiohttpSession(timeout=timeout)
 
         # Создаем бота с новой сессией
@@ -412,9 +429,14 @@ async def main():
             await dp.start_polling(bot)
 
         except (TelegramNetworkError, OSError, asyncio.TimeoutError) as e:
-            print(f"🔥 PROXY ERROR: {e}")
-            print("🔄 Switching to next proxy...")
-            # Цикл while True перейдет на следующую итерацию
+            print(f"🔥 NETWORK ERROR: {e}")
+
+            if enable_proxy:
+                print("🔄 Switching to next proxy...")
+                # Цикл while True перейдет на следующую итерацию
+            else:
+                print("⏳ Connection failed. Retrying in 5s...")
+                await asyncio.sleep(5)
 
         except Exception as e:
             print(f"❌ CRITICAL ERROR: {e}")

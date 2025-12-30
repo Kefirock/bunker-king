@@ -12,7 +12,7 @@ class BotEngine:
                         game_state: GameState,
                         director_instruction: str = "") -> str:
 
-        # 1. Туман войны
+        # 1. Туман войны (получаем, что видит этот бот)
         public_info = self._get_visible_profiles(all_players, game_state.round)
         public_info_str = "\n".join([str(p) for p in public_info])
 
@@ -22,7 +22,7 @@ class BotEngine:
         mem_depth = bot_settings.get("memory_depth", 10)
         history_text = "\n".join(game_state.history[-mem_depth:]) if game_state.history else "Начало."
 
-        # 2. Поиск своей последней фразы
+        # 2. Поиск своей последней фразы (чтобы не повторяться)
         my_last_speech = "Пока не говорил."
         for line in reversed(game_state.history):
             if line.startswith(f"[{bot_profile.name}]"):
@@ -30,12 +30,12 @@ class BotEngine:
                 if len(parts) > 1: my_last_speech = parts[1]
                 break
 
-        # 3. ЛОГИКА ЦЕЛЕУКАЗАНИЯ (NEW)
-        # Мы считаем угрозы ДО того, как бот откроет рот.
+        # 3. ЛОГИКА ЦЕЛЕУКАЗАНИЯ (FIXED: Исправлена ошибка IndexError)
         target_instruction = ""
         if game_state.phase in ["discussion", "runoff"]:
             best_target = None
             max_threat = -1
+            best_reasons = []  # <--- FIX: Переменная для сохранения причин лучшей цели
 
             # Проходим по всем игрокам (кроме себя)
             for target in all_players:
@@ -47,10 +47,13 @@ class BotEngine:
                 if score > max_threat:
                     max_threat = score
                     best_target = target
+                    best_reasons = reasons  # <--- FIX: Запоминаем причины именно этого кандидата
 
             # Если есть явный враг (score > 0), добавляем инструкцию
             if best_target and max_threat > 0:
-                reasons_text = ", ".join(reasons[0]) if isinstance(reasons[0], list) else ", ".join(reasons)
+                # Используем best_reasons, а не reasons (чтобы не взять данные последнего игрока цикла)
+                reasons_text = ", ".join(best_reasons) if best_reasons else "интуиция"
+
                 target_instruction = (
                     f"\n>>> ВНУТРЕННИЙ АНАЛИЗ УГРОЗ <<<\n"
                     f"Твои инстинкты подсказывают, что {best_target.name} — главная угроза (Уровень: {int(max_threat)}).\n"
@@ -85,7 +88,7 @@ class BotEngine:
         full_prompt += f"\n\nЗАДАЧА ТЕКУЩЕЙ ФАЗЫ ({game_state.phase}): {current_phase_task}"
         full_prompt += director_part
 
-        # 5. Генерация
+        # 5. Генерация через LLM
         response = await llm.generate(
             bot_profile.llm_config,
             messages=[
@@ -160,7 +163,7 @@ class BotEngine:
 
     def _calculate_threat(self, me: PlayerProfile, target: PlayerProfile):
         """
-        Threat = BaseFactor * PersonalityMultiplier
+        Математический расчет угрозы: Threat = BaseFactor * PersonalityMultiplier
         """
         score = 0
         reasons = []

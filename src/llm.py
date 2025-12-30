@@ -11,7 +11,7 @@ except ImportError:
     Cerebras = None
 
 from src.config import cfg
-from src.logger_service import game_logger  # <--- ИМПОРТ ЛОГГЕРА
+from src.logger_service import game_logger
 
 load_dotenv(os.path.join("Configs", ".env"))
 
@@ -42,11 +42,11 @@ class LLMService:
 
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-            if not any("json" in m["content"].lower() for m in messages):
-                # Добавляем системное напоминание, если его нет в основном промпте
-                if messages and messages[0]["role"] == "system":
-                    messages[0]["content"] += " ОТВЕТЬ СТРОГО В JSON."
-                else:  # Если системного промпта нет, добавляем его
+            # Безопасная проверка контента сообщений (защита от None в messages)
+            if not any("json" in (m.get("content") or "").lower() for m in messages):
+                if messages and messages[0].get("role") == "system":
+                    messages[0]["content"] = (messages[0].get("content") or "") + " ОТВЕТЬ СТРОГО В JSON."
+                else:
                     messages.insert(0, {"role": "system", "content": "ОТВЕТЬ СТРОГО В JSON."})
 
         response_content = ""
@@ -58,8 +58,6 @@ class LLMService:
 
             elif provider == "cerebras":
                 if not self.cerebras_client: raise ValueError("Cerebras API Key missing")
-                # Для Cerebras в асинхронном контексте может потребоваться asyncio.to_thread
-                # Но пока оставим прямой вызов, как будто он асинхронный или работает быстро
                 completion = self.cerebras_client.chat.completions.create(**kwargs)
                 response_content = completion.choices[0].message.content
 
@@ -69,6 +67,11 @@ class LLMService:
         except Exception as e:
             logging.error(f"LLM Error ({provider}): {e}")
             response_content = "{}" if json_mode else "Error generating response."
+
+        # --- FIX: Защита от None, если API вернуло пустой объект ---
+        if response_content is None:
+            response_content = "{}" if json_mode else ""
+        # -----------------------------------------------------------
 
         # --- ЛОГИРОВАНИЕ LLM ВЗАИМОДЕЙСТВИЯ ---
         game_logger.log_llm_interaction(
@@ -82,7 +85,17 @@ class LLMService:
         return response_content
 
     @staticmethod
-    def parse_json(text: str) -> Dict[str, Any]:
+    def parse_json(text: Optional[str]) -> Dict[str, Any]:
+        """
+        Парсит JSON из ответа LLM.
+        Добавлена защита от None (ошибка AttributeError).
+        """
+        # --- FIX: Проверка на пустоту ---
+        if not text:
+            logging.warning("⚠️ LLM returned empty response/None during JSON parsing")
+            return {}
+        # --------------------------------
+
         clean_text = text.replace("```json", "").replace("```", "").strip()
         try:
             return json.loads(clean_text)

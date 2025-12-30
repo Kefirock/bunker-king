@@ -4,14 +4,15 @@ import os
 import sys
 import socket
 import random
+import shutil  # <--- Для архивации логов
 from collections import Counter
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command  # <--- Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, FSInputFile  # <--- FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
@@ -131,6 +132,44 @@ async def cmd_start(message: Message, state: FSMContext):
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
     await message.answer("<b>BUNKER 3.0</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
+
+
+# --- АДМИНСКАЯ КОМАНДА ДЛЯ ЛОГОВ ---
+@router.message(Command("logs"))
+async def cmd_get_logs(message: Message):
+    """Архивирует последнюю сессию и отправляет в чат."""
+    logs_dir = "Logs"
+    if not os.path.exists(logs_dir):
+        await message.answer("📂 Папка с логами пуста.")
+        return
+
+    # Ищем самую свежую папку сессии
+    try:
+        subdirs = [os.path.join(logs_dir, d) for d in os.listdir(logs_dir) if os.path.isdir(os.path.join(logs_dir, d))]
+        if not subdirs:
+            await message.answer("📂 Нет активных сессий.")
+            return
+
+        # Сортируем по дате создания (последняя - самая свежая)
+        latest_session = max(subdirs, key=os.path.getmtime)
+        session_name = os.path.basename(latest_session)
+
+        await message.answer(f"📦 Архивирую сессию: {session_name}...")
+
+        # Создаем ZIP архив
+        zip_name = f"{session_name}.zip"
+        # make_archive требует полного пути без расширения
+        shutil.make_archive(session_name, 'zip', latest_session)
+
+        # Отправляем файл
+        logfile = FSInputFile(f"{session_name}.zip")
+        await message.answer_document(logfile, caption=f"🗂 Логи игры: {session_name}")
+
+        # Удаляем временный архив, чтобы не мусорить
+        os.remove(f"{session_name}.zip")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при сборе логов: {e}")
 
 
 @router.callback_query(F.data == "start_game")
@@ -404,7 +443,6 @@ async def main():
             current_proxy = proxy_manager.get_next_proxy()
             if current_proxy:
                 print(f"📡 Connecting via SOCKS5: {current_proxy}")
-                # Убрали явную настройку timeout, чтобы aiogram использовал стандартные значения
                 session = AiohttpSession(proxy=current_proxy)
             else:
                 print("⚠️ No proxies available. Using direct connection.")

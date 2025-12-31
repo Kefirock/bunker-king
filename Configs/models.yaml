@@ -1,6 +1,4 @@
 player_models:
-  - provider: "groq"
-    model_id: "llama-3.3-70b-versatile"
   - provider: "cerebras"
     model_id: "llama-3.3-70b"
   - provider: "groq"
@@ -17,7 +15,18 @@ player_models:
     model_id: "moonshotai/kimi-k2-instruct"
 
 director_models:
-  - provider: "groq"
-    model_id: "llama-3.3-70b-versatile"
+
   - provider: "cerebras"
     model_id: "llama3.1-8b"
+  - provider: "groq"
+    model_id: "qwen/qwen3-32b"
+  - provider: "cerebras"
+    model_id: "qwen-3-32b"
+
+disabled_directors:
+  - provider: "groq"
+    model_id: "llama-3.3-70b-versatile"
+
+disabled_models:
+  - provider: "groq"
+    model_id: "llama-3.3-70b-versatile"

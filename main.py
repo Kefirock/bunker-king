@@ -29,7 +29,7 @@ from src.services.bot import BotEngine
 from src.services.judge import JudgeService
 from src.services.director import DirectorEngine
 from src.logger_service import game_logger
-from src.s3_service import s3_uploader  # <--- Новый импорт
+from src.s3_service import s3_uploader
 
 load_dotenv(os.path.join("Configs", ".env"))
 
@@ -143,7 +143,7 @@ def get_display_topic(gs: GameState, player_trait: str = "", catastrophe_data: d
 async def cmd_start(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
-    await message.answer("<b>BUNKER 3.0 (S3 Edition)</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+    await message.answer("<b>BUNKER 3.0 (S3 + UI Edition)</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
 
 
@@ -161,23 +161,18 @@ async def cmd_get_logs(message: Message):
             await message.answer("📂 Нет активных сессий.")
             return
 
-        # Находим самую свежую папку
         latest_session_path = max(subdirs, key=os.path.getmtime)
         session_name = os.path.basename(latest_session_path)
 
         await message.answer(f"☁️ Начинаю выгрузку в облако: {session_name}...")
 
-        # Запускаем загрузку в S3 (в отдельном потоке)
         success = await asyncio.to_thread(s3_uploader.upload_session_folder, latest_session_path)
 
         if success:
             await message.answer(f"✅ Логи успешно сохранены в S3!\nПапка: <code>{session_name}</code>",
                                  parse_mode="HTML")
-
-            # Очистка диска (важно для Koyeb)
             try:
                 shutil.rmtree(latest_session_path)
-                print(f"🗑️ Deleted local folder: {session_name}")
             except Exception as e:
                 print(f"⚠️ Cleanup warning: {e}")
         else:
@@ -208,10 +203,13 @@ async def start_game_handler(callback: CallbackQuery, state: FSMContext):
         catastrophe=current_catastrophe,
         current_turn_index=0
     )
+
+    # ФОРМИРУЕМ СПИСОК ИГРОКОВ (Формат Раунда 1)
     intro = f"🌍 <b>СЦЕНАРИЙ:</b> {current_catastrophe['name']}\n\n👥 <b>ИГРОКИ:</b>\n"
     for p in players:
-        role = p.profession if p.is_human else "???"
-        intro += f"- {p.name}: {role}\n"
+        display_name = GameSetup.get_display_name(p, 1)
+        intro += f"- {display_name}\n"
+
     await callback.message.edit_text(intro, parse_mode="HTML")
     await start_round(callback.message.chat.id, state)
 
@@ -222,7 +220,12 @@ async def start_round(chat_id: int, state: FSMContext):
     gs.phase = "presentation"
     base_topic = get_topic_for_round_base(gs.round, trait="...", catastrophe_data=data.get("catastrophe"))
     gs.topic = base_topic
-    msg = f"🔔 <b>РАУНД {gs.round}</b>\nТема: {base_topic}\n\n🗣 <b>ФАЗА 1: ПРЕЗЕНТАЦИЯ</b>"
+
+    # СПИСОК ИГРОКОВ ПЕРЕД РАУНДОМ (С учетом раскрытия)
+    players = [PlayerProfile(**p) for p in data["players"]]
+    active_list_str = "\n".join([f"- {GameSetup.get_display_name(p, gs.round)}" for p in players if p.is_alive])
+
+    msg = f"🔔 <b>РАУНД {gs.round}</b>\nТема: {base_topic}\n\n{active_list_str}\n\n🗣 <b>ФАЗА 1: ПРЕЗЕНТАЦИЯ</b>"
     await bot.send_message(chat_id, msg, parse_mode="HTML")
     await state.update_data(game_state=gs.model_dump(), current_turn_index=0)
     await process_turn(chat_id, state)
@@ -274,7 +277,12 @@ async def process_turn(chat_id: int, state: FSMContext):
         await bot.send_chat_action(chat_id, "typing")
         instr = await director_engine.get_hidden_instruction(current_player, players, temp_gs)
         speech = await bot_engine.make_turn(current_player, players, temp_gs, director_instruction=instr)
-        await bot.send_message(chat_id, f"🤖 <b>{current_player.name}</b>:\n{speech}", parse_mode="HTML")
+
+        # --- КРАСИВОЕ ОТОБРАЖЕНИЕ ИМЕНИ В ЧАТЕ ---
+        display_name = GameSetup.get_display_name(current_player, gs.round)
+        await bot.send_message(chat_id, f"🤖 {display_name}:\n{speech}", parse_mode="HTML")
+        # ----------------------------------------
+
         verdict = await judge_service.analyze_move(current_player, speech, actual_topic)
         current_player.suspicion_score = verdict["total_suspicion"]
 
@@ -333,15 +341,26 @@ async def start_voting(chat_id: int, state: FSMContext):
     gs = GameState(**data["game_state"])
     targets = players
     title = "ГОЛОСОВАНИЕ"
+
+    # Формируем текст списка с полными статусами
+    list_text = "<b>Кандидаты:</b>\n"
+
     if gs.runoff_candidates:
         targets = [p for p in players if p.name in gs.runoff_candidates]
         title = f"ПЕРЕГОЛОСОВАНИЕ ({' vs '.join(gs.runoff_candidates)})"
+
     kb = InlineKeyboardBuilder()
     for p in targets:
+        # Для списка в сообщении - полный формат
+        list_text += f"- {GameSetup.get_display_name(p, gs.round)}\n"
+
+        # Для кнопки - краткий формат, чтобы влезло
         if not p.is_human or cfg.gameplay["voting"]["allow_self_vote"]:
-            kb.add(InlineKeyboardButton(text=f"☠ {p.name}", callback_data=f"vote_{p.name}"))
+            btn_text = f"☠ {p.name} [{p.profession}]"
+            kb.add(InlineKeyboardButton(text=btn_text, callback_data=f"vote_{p.name}"))
+
     kb.adjust(1)
-    await bot.send_message(chat_id, f"🛑 <b>{title}</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+    await bot.send_message(chat_id, f"🛑 <b>{title}</b>\n\n{list_text}", reply_markup=kb.as_markup(), parse_mode="HTML")
     await state.set_state(GameFSM.Voting)
 
 
@@ -369,12 +388,15 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
     results = counts.most_common()
     leader_name, leader_votes = results[0]
     leaders = [name for name, count in results if count == leader_votes]
-    result_text = f"📊 <b>ИТОГИ:</b> {dict(counts)}\n"
+
+    result_text = f"📊 <b>ИТОГИ:</b>\n"
+    for name, cnt in counts.items():
+        result_text += f"- {name}: {cnt}\n"
 
     if len(leaders) > 1:
         if gs.runoff_count >= cfg.gameplay["voting"]["max_runoffs"]:
             loser_name = random.choice(leaders)
-            result_text += f"⚖️ Снова ничья. Жребий выбрал: <b>{loser_name}</b>"
+            result_text += f"\n⚖️ Снова ничья. Жребий выбрал: <b>{loser_name}</b>"
             await callback.message.answer(result_text, parse_mode="HTML")
             await eliminate_player(loser_name, chat_id, state)
             return
@@ -386,7 +408,7 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
         await process_turn(chat_id, state)
         return
 
-    await callback.message.answer(f"{result_text}🚪 <b>{leader_name}</b> изгнан.", parse_mode="HTML")
+    await callback.message.answer(f"{result_text}\n🚪 <b>{leader_name}</b> изгнан.", parse_mode="HTML")
     await eliminate_player(leader_name, chat_id, state)
 
 
@@ -406,16 +428,13 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
                     latest = max(subdirs, key=os.path.getmtime)
                     folder_name = os.path.basename(latest)
 
-                    # Загрузка
                     success = await asyncio.to_thread(s3_uploader.upload_session_folder, latest)
 
                     if success:
                         await bot.send_message(chat_id, f"💾 Логи игры <b>{folder_name}</b> сохранены в облако.",
                                                parse_mode="HTML")
-                        # Очистка
                         try:
                             shutil.rmtree(latest)
-                            print(f"🗑️ Auto-cleaned: {folder_name}")
                         except Exception as e:
                             print(f"⚠️ Clean error: {e}")
                     else:

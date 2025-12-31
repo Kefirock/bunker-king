@@ -13,10 +13,16 @@ class JudgeService:
 
         prompt_template = cfg.prompts["judge"]["system"]
 
+        # --- FIX: Ослепляем судью ---
+        # Мы не передаем реальный trait, чтобы судья оценивал только сказанное в тексте.
+        # Если игрок скажет "у меня пистолет", судья увидит это в 'text'.
+        # А если игрок молчит, судья не должен знать про 'trait'.
+        trait_for_judge = "Неизвестно (если игрок сам не сказал)"
+
         system_prompt = prompt_template.format(
             name=player.name,
             profession=player.profession,
-            trait=player.trait,
+            trait=trait_for_judge,
             text=text,
             topic=topic
         )
@@ -45,23 +51,19 @@ class JudgeService:
         # 1. ОБНОВЛЕНИЕ ФАКТОРОВ (ГРЕХОВ)
         if violation_type in factors_weights:
             base_weight = factors_weights[violation_type]
-            # Записываем или обновляем фактор
-            # Если фактор уже есть, берем максимум (чтобы не спамить +100 за каждый чих, если уже есть вирус)
             current_val = player.active_factors.get(violation_type, 0)
             player.active_factors[violation_type] = max(current_val, base_weight)
             score_change += base_weight
 
         # 2. ЛОГИКА ОПРАВДАНИЯ (Mitigation)
-        # Если аргумент сильный, снижаем ВСЕ факторы
         if argument_quality == "strong":
-            multiplier = mitigation["strong_argument"]  # 0.5
+            multiplier = mitigation["strong_argument"]
             for key in player.active_factors:
                 player.active_factors[key] = int(player.active_factors[key] * multiplier)
-            score_change -= 10  # Бонус к общему скору
+            score_change -= 10
 
         elif argument_quality == "bad":
-            # Если аргумент плохой, увеличиваем факторы немного
-            multiplier = mitigation["bad_argument"]  # 1.2
+            multiplier = mitigation["bad_argument"]
             for key in player.active_factors:
                 player.active_factors[key] = int(player.active_factors[key] * multiplier)
             score_change += 10

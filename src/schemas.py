@@ -31,7 +31,7 @@ class PlayerProfile(BaseModel):
 
 
 class PublicPlayerInfo(BaseModel):
-    """То, что видят другие игроки"""
+    """То, что видят другие игроки (через LLM)"""
     name: str
     profession: Optional[str] = None
     trait: Optional[str] = None
@@ -41,15 +41,23 @@ class PublicPlayerInfo(BaseModel):
     known_factors: List[str] = []
 
     def __str__(self):
+        """
+        Формирует описание игрока для ПРОМПТА БОТА.
+        ВАЖНО: Не добавлять сюда технические теги в скобках, иначе боты их читают.
+        """
         prof = self.profession if self.profession else "???"
         tr = f", {self.trait}" if self.trait else ""
-        st = f" [{self.status}]" if self.status else ""
 
-        factors_str = ""
-        if self.known_factors:
-            factors_str = f" [⚠️{', '.join(self.known_factors)}]"
+        # Заменяем CAPS-статусы на литературное описание для ИИ
+        st = ""
+        if self.status == "SUSPICIOUS":
+            st = " (Ведет себя подозрительно)"
+        elif self.status == "LIAR":
+            st = " (Пойман на лжи)"
+        elif self.status == "IMPOSTOR":
+            st = " (Явная угроза)"
 
-        return f"- {self.name}: {prof}{tr}{st}{factors_str}"
+        return f"- {self.name}: {prof}{tr}{st}"
 
 
 class GameState(BaseModel):

@@ -17,45 +17,27 @@ class GameSetup:
         personalities_data = scenarios.get("personalities", [])
         bot_models = cfg.models["player_models"]
 
-        # Перемешиваем колоды
         random.shuffle(profs)
         random.shuffle(traits)
         random.shuffle(names)
 
         players = []
 
-        # 1. Сначала определяем количество людей (пока 1, в будущем список)
-        # В будущем здесь будет: humans_list = [user1, user2, ...]
+        # 1. Настройки количества
         human_count = 1
-
-        # 2. Считываем целевое количество игроков из конфига
-        # Если настройки нет, по умолчанию 5
         target_total = cfg.gameplay.get("setup", {}).get("total_players", 5)
-
-        # Вычисляем, сколько нужно ботов
         bots_needed = max(0, target_total - human_count)
 
-        # 3. Создаем БОТОВ
+        # 2. Создаем БОТОВ
         for i in range(bots_needed):
-            # Безопасное получение имени (если ботов больше, чем имен в списке)
             if names:
                 bot_name = names.pop()
             else:
                 bot_name = f"Bot-{i + 1}"
 
-            # Безопасное получение профессии (если закончились)
-            if profs:
-                bot_prof = profs.pop()
-            else:
-                bot_prof = "Безработный"
+            bot_prof = profs.pop() if profs else "Безработный"
+            bot_trait = traits.pop() if traits else "Обычный человек"
 
-            # Безопасное получение черты
-            if traits:
-                bot_trait = traits.pop()
-            else:
-                bot_trait = "Обычный человек"
-
-            # Случайный характер
             p_data = random.choice(personalities_data)
             persona = Persona(
                 id=p_data["id"],
@@ -74,7 +56,7 @@ class GameSetup:
             )
             players.append(bot)
 
-        # 4. Создаем ЧЕЛОВЕКА (User)
+        # 3. Создаем ЧЕЛОВЕКА
         human_persona = Persona(
             id="human",
             description="Игрок",
@@ -82,7 +64,6 @@ class GameSetup:
             multipliers={}
         )
 
-        # Для человека тоже берем уникальные данные, если остались
         human = PlayerProfile(
             name=f"{user_name} (Вы)",
             profession=profs.pop() if profs else "Выживший",
@@ -107,3 +88,20 @@ class GameSetup:
             topic=f"{scenario['name']}: {topic}",
             history=[]
         )
+
+    @staticmethod
+    def get_display_name(player: PlayerProfile, round_num: int) -> str:
+        """
+        Форматирует имя для отображения В ТЕЛЕГРАМЕ (UI).
+        Раунд 1: Имя [Профессия]
+        Раунд 2+: Имя [Профессия, Черта]
+        """
+        # Если игрок человек - не добавляем лишнего, он знает о себе
+        if player.is_human:
+            # Можно добавить (Вы), но оно обычно уже есть в player.name
+            return f"<b>{player.name}</b> [{player.profession}, {player.trait}]"
+
+        if round_num == 1:
+            return f"<b>{player.name}</b> [{player.profession}]"
+        else:
+            return f"<b>{player.name}</b> [{player.profession}, {player.trait}]"

@@ -12,7 +12,7 @@ class BotEngine:
                         game_state: GameState,
                         director_instruction: str = "") -> str:
 
-        # 1. Туман войны (получаем, что видит этот бот)
+        # 1. Туман войны
         public_info = self._get_visible_profiles(all_players, game_state.round)
         public_info_str = "\n".join([str(p) for p in public_info])
 
@@ -22,7 +22,7 @@ class BotEngine:
         mem_depth = bot_settings.get("memory_depth", 10)
         history_text = "\n".join(game_state.history[-mem_depth:]) if game_state.history else "Начало."
 
-        # 2. Поиск своей последней фразы (чтобы не повторяться)
+        # 2. Поиск своей последней фразы
         my_last_speech = "Пока не говорил."
         for line in reversed(game_state.history):
             if line.startswith(f"[{bot_profile.name}]"):
@@ -30,29 +30,32 @@ class BotEngine:
                 if len(parts) > 1: my_last_speech = parts[1]
                 break
 
-        # 3. ЛОГИКА ЦЕЛЕУКАЗАНИЯ (FIXED: Исправлена ошибка IndexError)
+        # 3. ЛОГИКА ЦЕЛЕУКАЗАНИЯ (FIXED v2)
         target_instruction = ""
         if game_state.phase in ["discussion", "runoff"]:
             best_target = None
             max_threat = -1
-            best_reasons = []  # <--- FIX: Переменная для сохранения причин лучшей цели
+            best_reasons = []  # Список для хранения причин лучшей цели
 
             # Проходим по всем игрокам (кроме себя)
             for target in all_players:
                 if target.name == bot_profile.name: continue
 
-                # Используем ту же математику, что и при голосовании
-                score, reasons = self._calculate_threat(bot_profile, target)
+                # Получаем скор и причины для ТЕКУЩЕГО (current) игрока в цикле
+                current_score, current_reasons = self._calculate_threat(bot_profile, target)
 
-                if score > max_threat:
-                    max_threat = score
+                if current_score > max_threat:
+                    max_threat = current_score
                     best_target = target
-                    best_reasons = reasons  # <--- FIX: Запоминаем причины именно этого кандидата
+                    best_reasons = current_reasons  # Сохраняем причины именно для победителя
 
-            # Если есть явный враг (score > 0), добавляем инструкцию
+            # Если есть явный враг
             if best_target and max_threat > 0:
-                # Используем best_reasons, а не reasons (чтобы не взять данные последнего игрока цикла)
-                reasons_text = ", ".join(best_reasons) if best_reasons else "интуиция"
+                # FIX: Используем best_reasons. Проверка простая: если список не пуст, склеиваем.
+                if best_reasons:
+                    reasons_text = ", ".join(best_reasons)
+                else:
+                    reasons_text = "интуиция"
 
                 target_instruction = (
                     f"\n>>> ВНУТРЕННИЙ АНАЛИЗ УГРОЗ <<<\n"
@@ -88,7 +91,7 @@ class BotEngine:
         full_prompt += f"\n\nЗАДАЧА ТЕКУЩЕЙ ФАЗЫ ({game_state.phase}): {current_phase_task}"
         full_prompt += director_part
 
-        # 5. Генерация через LLM
+        # 5. Генерация
         response = await llm.generate(
             bot_profile.llm_config,
             messages=[
@@ -109,7 +112,7 @@ class BotEngine:
         valid_targets = [p for p in candidates if p.name != bot_profile.name]
 
         threat_assessment = ""
-        # Сортируем цели по уровню угрозы для наглядности в промпте
+        # Сортируем цели по уровню угрозы
         scored_targets = []
         for target in valid_targets:
             danger_score, reasons = self._calculate_threat(bot_profile, target)
@@ -153,7 +156,7 @@ class BotEngine:
 
         target_names = [p.name for p in valid_targets]
         if vote not in target_names:
-            # Fallback: берем самого опасного по математике
+            # Fallback
             if scored_targets:
                 vote = scored_targets[0][0].name
             else:
@@ -163,7 +166,7 @@ class BotEngine:
 
     def _calculate_threat(self, me: PlayerProfile, target: PlayerProfile):
         """
-        Математический расчет угрозы: Threat = BaseFactor * PersonalityMultiplier
+        Threat = BaseFactor * PersonalityMultiplier
         """
         score = 0
         reasons = []

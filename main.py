@@ -4,22 +4,23 @@ import os
 import sys
 import socket
 import random
-import shutil  # <--- Для архивации логов
+import shutil
+import aiohttp  # <--- Для пинга самого себя
 from collections import Counter
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart, Command  # <--- Command
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, FSInputFile  # <--- FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
 from aiohttp import web
 from aiogram.exceptions import TelegramNetworkError
 
-# Импортируем обновленный менеджер
+# Импорты проекта
 from src.proxy_manager import ProxyManager
 from src.config import cfg
 from src.utils import GameSetup
@@ -31,7 +32,7 @@ from src.logger_service import game_logger
 
 load_dotenv(os.path.join("Configs", ".env"))
 
-# --- DNS FIX (Управляемый через ENV) ---
+# --- DNS FIX ---
 if os.getenv("ENABLE_DNS_FIX", "false").lower() == "true":
     try:
         import dns.resolver
@@ -57,21 +58,17 @@ if os.getenv("ENABLE_DNS_FIX", "false").lower() == "true":
 
 
         socket.getaddrinfo = global_dns_patch
-        print("🔧 DNS Patch applied (Backup for direct connection)")
+        print("🔧 DNS Patch applied")
     except ImportError:
-        print("⚠️ dnspython not found, DNS patch skipped")
+        print("⚠️ dnspython not found")
 else:
-    print("✅ DNS Patch disabled (Standard System Resolver used)")
-# -------------------------------------------------------------------------------
+    print("✅ DNS Patch disabled")
 
-# Инициализация сервисов
+# Инициализация
 bot_engine = BotEngine()
 judge_service = JudgeService()
 director_engine = DirectorEngine()
-
-# Глобальный объект бота
 bot: Bot = None
-
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -84,7 +81,7 @@ class GameFSM(StatesGroup):
     Voting = State()
 
 
-# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ---
+# --- WEB & KEEP-ALIVE ---
 async def health_check(request):
     return web.Response(text="Bunker Bot is alive")
 
@@ -94,13 +91,31 @@ async def start_dummy_server():
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", 7860))
+    port = int(os.getenv("PORT", 8000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🌐 Dummy server listening on port {port}")
 
+    # Запускаем пинг самого себя, чтобы Koyeb не уснул
+    asyncio.create_task(keep_alive_task(port))
 
-# --- ИГРОВАЯ ЛОГИКА ---
+
+async def keep_alive_task(port):
+    """Пингует локальный сервер каждые 5 минут, эмулируя активность."""
+    url = f"http://127.0.0.1:{port}/"
+    print(f"⏰ Keep-Alive task started for {url}")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            await asyncio.sleep(300)  # 5 минут
+            try:
+                async with session.get(url) as resp:
+                    await resp.text()
+                # print("⏰ Self-ping success") # Можно раскомментить для дебага
+            except Exception as e:
+                print(f"⚠️ Self-ping failed: {e}")
+
+
+# --- ИГРА ---
 def get_topic_for_round_base(round_num: int, trait: str = "", catastrophe_data: dict = None) -> str:
     topics_cfg = cfg.gameplay["rounds"]["topics"]
     if round_num == 1:
@@ -118,14 +133,14 @@ def get_display_topic(gs: GameState, player_trait: str = "", catastrophe_data: d
     if gs.phase == "presentation":
         return get_topic_for_round_base(gs.round, player_trait, catastrophe_data)
     elif gs.phase == "discussion":
-        return "ОБСУЖДЕНИЕ. Кто лишний? Назови имя того, против кого будешь голосовать, и объясни почему."
+        return "ОБСУЖДЕНИЕ. Кто лишний?"
     elif gs.phase == "runoff":
         candidates_str = ", ".join(gs.runoff_candidates)
-        return f"ПЕРЕСТРЕЛКА. {candidates_str} на грани вылета. Докажи, что ты полезнее."
+        return f"ПЕРЕСТРЕЛКА. {candidates_str} на грани вылета."
     return "..."
 
 
-# --- ХЕНДЛЕРЫ ---
+# --- HANDLERS ---
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
@@ -134,42 +149,33 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.set_state(GameFSM.Lobby)
 
 
-# --- АДМИНСКАЯ КОМАНДА ДЛЯ ЛОГОВ ---
 @router.message(Command("logs"))
 async def cmd_get_logs(message: Message):
-    """Архивирует последнюю сессию и отправляет в чат."""
+    """Архивирует и шлет логи (вызывается также автоматически в конце игры)."""
     logs_dir = "Logs"
     if not os.path.exists(logs_dir):
         await message.answer("📂 Папка с логами пуста.")
         return
 
-    # Ищем самую свежую папку сессии
     try:
         subdirs = [os.path.join(logs_dir, d) for d in os.listdir(logs_dir) if os.path.isdir(os.path.join(logs_dir, d))]
         if not subdirs:
             await message.answer("📂 Нет активных сессий.")
             return
 
-        # Сортируем по дате создания (последняя - самая свежая)
         latest_session = max(subdirs, key=os.path.getmtime)
         session_name = os.path.basename(latest_session)
 
-        await message.answer(f"📦 Архивирую сессию: {session_name}...")
+        # await message.answer(f"📦 Собираю логи: {session_name}...")
 
-        # Создаем ZIP архив
-        zip_name = f"{session_name}.zip"
-        # make_archive требует полного пути без расширения
         shutil.make_archive(session_name, 'zip', latest_session)
-
-        # Отправляем файл
         logfile = FSInputFile(f"{session_name}.zip")
-        await message.answer_document(logfile, caption=f"🗂 Логи игры: {session_name}")
-
-        # Удаляем временный архив, чтобы не мусорить
+        await message.answer_document(logfile, caption=f"🗂 Логи сессии: {session_name}")
         os.remove(f"{session_name}.zip")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка при сборе логов: {e}")
+        print(f"Log Error: {e}")
+        await message.answer(f"❌ Не удалось собрать логи: {e}")
 
 
 @router.callback_query(F.data == "start_game")
@@ -207,7 +213,6 @@ async def start_round(chat_id: int, state: FSMContext):
     base_topic = get_topic_for_round_base(gs.round, trait="...", catastrophe_data=data.get("catastrophe"))
     gs.topic = base_topic
     msg = f"🔔 <b>РАУНД {gs.round}</b>\nТема: {base_topic}\n\n🗣 <b>ФАЗА 1: ПРЕЗЕНТАЦИЯ</b>"
-    # Используем глобального бота
     await bot.send_message(chat_id, msg, parse_mode="HTML")
     await state.update_data(game_state=gs.model_dump(), current_turn_index=0)
     await process_turn(chat_id, state)
@@ -268,8 +273,6 @@ async def process_turn(chat_id: int, state: FSMContext):
             current_player.status = "IMPOSTOR"
         elif current_player.suspicion_score >= thresholds["liar"]:
             current_player.status = "LIAR"
-        elif current_player.suspicion_score >= thresholds["suspicious"]:
-            current_player.status = "SUSPICIOUS"
         else:
             current_player.status = "NORMAL"
 
@@ -299,16 +302,6 @@ async def human_turn_handler(message: Message, state: FSMContext):
 
     verdict = await judge_service.analyze_move(player, message.text, actual_topic)
     player.suspicion_score = verdict["total_suspicion"]
-
-    thresholds = cfg.gameplay["judge"]["status_thresholds"]
-    if player.suspicion_score >= thresholds["impostor"]:
-        player.status = "IMPOSTOR"
-    elif player.suspicion_score >= thresholds["liar"]:
-        player.status = "LIAR"
-    elif player.suspicion_score >= thresholds["suspicious"]:
-        player.status = "SUSPICIOUS"
-    else:
-        player.status = "NORMAL"
 
     gs.history.append(f"[{player.name}]: {message.text}")
     for i, p in enumerate(players):
@@ -392,14 +385,40 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
     players = [PlayerProfile(**p) for p in data["players"]]
     survivors = [p for p in players if p.name != loser_name]
 
+    # --- АВТОМАТИЧЕСКАЯ ОТПРАВКА ЛОГОВ ПОСЛЕ ИГРЫ (для Free Tier без Volumes) ---
+    async def send_logs_auto():
+        # Создаем фейковое сообщение, чтобы переиспользовать код cmd_get_logs
+        # (Это немного хак, но рабочий и быстрый)
+        dummy_msg = Message(message_id=0, date=datetime.datetime.now(), chat=bot.get_chat(chat_id=chat_id))
+        # Присваиваем боту и чату правильные атрибуты вручную, если нужно,
+        # но проще просто скопировать логику отправки:
+        try:
+            logs_dir = "Logs"
+            if os.path.exists(logs_dir):
+                subdirs = [os.path.join(logs_dir, d) for d in os.listdir(logs_dir) if
+                           os.path.isdir(os.path.join(logs_dir, d))]
+                if subdirs:
+                    latest = max(subdirs, key=os.path.getmtime)
+                    name = os.path.basename(latest)
+                    shutil.make_archive(name, 'zip', latest)
+                    await bot.send_document(chat_id, FSInputFile(f"{name}.zip"),
+                                            caption=f"🏁 Игра окончена. Логи: {name}")
+                    os.remove(f"{name}.zip")
+        except Exception as e:
+            print(f"Auto-log error: {e}")
+
+    # --------------------------------------------------------------------------
+
     if not any(p.is_human for p in survivors):
         await bot.send_message(chat_id, "💀 <b>GAME OVER</b>. Вы погибли.", parse_mode="HTML")
+        await send_logs_auto()  # Шлем логи
         await state.clear()
         return
 
     if len(survivors) <= cfg.gameplay["rounds"]["target_survivors"]:
         names = ", ".join([p.name for p in survivors])
         await bot.send_message(chat_id, f"🎉 <b>ПОБЕДА!</b> Выжили: {names}", parse_mode="HTML")
+        await send_logs_auto()  # Шлем логи
         await state.clear()
         return
 
@@ -425,27 +444,23 @@ async def main():
         return
 
     enable_proxy = os.getenv("ENABLE_PROXY", "false").lower() == "true"
-
     proxy_manager = None
     if enable_proxy:
-        print("🚀 Proxy Mode: ENABLED. Loading proxies.txt...")
+        print("🚀 Proxy Mode: ENABLED.")
         proxy_manager = ProxyManager("proxies.txt")
     else:
-        print("🚀 Proxy Mode: DISABLED. Using direct connection.")
+        print("🚀 Proxy Mode: DISABLED.")
 
     print("🚀 Starting Bot Loop...")
 
     while True:
         session = None
         current_proxy = None
-
         if enable_proxy and proxy_manager:
             current_proxy = proxy_manager.get_next_proxy()
             if current_proxy:
-                print(f"📡 Connecting via SOCKS5: {current_proxy}")
                 session = AiohttpSession(proxy=current_proxy)
             else:
-                print("⚠️ No proxies available. Using direct connection.")
                 session = AiohttpSession()
         else:
             session = AiohttpSession()
@@ -456,27 +471,19 @@ async def main():
             print("Trying to start polling...")
             await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(bot)
-
         except (TelegramNetworkError, OSError, asyncio.TimeoutError) as e:
             print(f"🔥 NETWORK ERROR: {e}")
-
-            if enable_proxy:
-                print("🔄 Switching to next proxy...")
-            else:
-                print("⏳ Connection failed. Retrying in 5s...")
-                await asyncio.sleep(5)
-
+            if not enable_proxy: await asyncio.sleep(5)
         except Exception as e:
             print(f"❌ CRITICAL ERROR: {e}")
-            print("⏳ Sleeping 5s before restart...")
             await asyncio.sleep(5)
-
         finally:
-            if bot and bot.session:
-                await bot.session.close()
+            if bot and bot.session: await bot.session.close()
 
 
 if __name__ == "__main__":
+    import datetime  # Нужен для хака с датой в авто-логах
+
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):

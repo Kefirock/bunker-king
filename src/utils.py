@@ -8,15 +8,14 @@ class GameSetup:
     @staticmethod
     def generate_players(user_name: str) -> List[PlayerProfile]:
         """
-        Создает список игроков: 1 Человек + (N-1) Ботов.
-        Данные берутся случайно из scenarios.yaml
+        Создает список игроков: Люди + Боты, заполняя слоты до total_players.
         """
         scenarios = cfg.scenarios
         profs = scenarios["professions"][:]
         traits = scenarios["traits"][:]
         names = scenarios["bot_names"][:]
-        # Загружаем характеры из конфига
         personalities_data = scenarios.get("personalities", [])
+        bot_models = cfg.models["player_models"]
 
         # Перемешиваем колоды
         random.shuffle(profs)
@@ -25,11 +24,38 @@ class GameSetup:
 
         players = []
 
-        # 1. Создаем БОТОВ
-        bot_models = cfg.models["player_models"]
+        # 1. Сначала определяем количество людей (пока 1, в будущем список)
+        # В будущем здесь будет: humans_list = [user1, user2, ...]
+        human_count = 1
 
-        for i in range(4):
-            # Случайный характер из списка
+        # 2. Считываем целевое количество игроков из конфига
+        # Если настройки нет, по умолчанию 5
+        target_total = cfg.gameplay.get("setup", {}).get("total_players", 5)
+
+        # Вычисляем, сколько нужно ботов
+        bots_needed = max(0, target_total - human_count)
+
+        # 3. Создаем БОТОВ
+        for i in range(bots_needed):
+            # Безопасное получение имени (если ботов больше, чем имен в списке)
+            if names:
+                bot_name = names.pop()
+            else:
+                bot_name = f"Bot-{i + 1}"
+
+            # Безопасное получение профессии (если закончились)
+            if profs:
+                bot_prof = profs.pop()
+            else:
+                bot_prof = "Безработный"
+
+            # Безопасное получение черты
+            if traits:
+                bot_trait = traits.pop()
+            else:
+                bot_trait = "Обычный человек"
+
+            # Случайный характер
             p_data = random.choice(personalities_data)
             persona = Persona(
                 id=p_data["id"],
@@ -39,17 +65,16 @@ class GameSetup:
             )
 
             bot = PlayerProfile(
-                name=names[i],
-                profession=profs.pop(),
-                trait=traits.pop(),
+                name=bot_name,
+                profession=bot_prof,
+                trait=bot_trait,
                 personality=persona,
                 is_human=False,
                 llm_config=random.choice(bot_models)
             )
             players.append(bot)
 
-        # 2. Создаем ЧЕЛОВЕКА
-        # Человеку даем нейтральный профиль
+        # 4. Создаем ЧЕЛОВЕКА (User)
         human_persona = Persona(
             id="human",
             description="Игрок",
@@ -57,10 +82,11 @@ class GameSetup:
             multipliers={}
         )
 
+        # Для человека тоже берем уникальные данные, если остались
         human = PlayerProfile(
             name=f"{user_name} (Вы)",
-            profession=profs.pop(),
-            trait=traits.pop(),
+            profession=profs.pop() if profs else "Выживший",
+            trait=traits.pop() if traits else "Счастливчик",
             personality=human_persona,
             is_human=True
         )

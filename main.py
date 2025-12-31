@@ -1,3 +1,7 @@
+--- START
+OF
+FILE
+main.py - --
 import asyncio
 import logging
 import os
@@ -5,7 +9,7 @@ import sys
 import socket
 import random
 import shutil
-import aiohttp  # <--- Для пинга самого себя
+import aiohttp
 from collections import Counter
 from dotenv import load_dotenv
 
@@ -29,6 +33,7 @@ from src.services.bot import BotEngine
 from src.services.judge import JudgeService
 from src.services.director import DirectorEngine
 from src.logger_service import game_logger
+from src.s3_service import s3_uploader  # <--- Новый импорт
 
 load_dotenv(os.path.join("Configs", ".env"))
 
@@ -95,22 +100,19 @@ async def start_dummy_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🌐 Dummy server listening on port {port}")
-
-    # Запускаем пинг самого себя, чтобы Koyeb не уснул
     asyncio.create_task(keep_alive_task(port))
 
 
 async def keep_alive_task(port):
-    """Пингует локальный сервер каждые 5 минут, эмулируя активность."""
+    """Пингует локальный сервер каждые 5 минут."""
     url = f"http://127.0.0.1:{port}/"
     print(f"⏰ Keep-Alive task started for {url}")
     async with aiohttp.ClientSession() as session:
         while True:
-            await asyncio.sleep(300)  # 5 минут
+            await asyncio.sleep(300)
             try:
                 async with session.get(url) as resp:
                     await resp.text()
-                # print("⏰ Self-ping success") # Можно раскомментить для дебага
             except Exception as e:
                 print(f"⚠️ Self-ping failed: {e}")
 
@@ -145,13 +147,13 @@ def get_display_topic(gs: GameState, player_trait: str = "", catastrophe_data: d
 async def cmd_start(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
-    await message.answer("<b>BUNKER 3.0</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+    await message.answer("<b>BUNKER 3.0 (S3 Edition)</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
 
 
 @router.message(Command("logs"))
 async def cmd_get_logs(message: Message):
-    """Архивирует и шлет логи (вызывается также автоматически в конце игры)."""
+    """Принудительная выгрузка последней сессии в S3."""
     logs_dir = "Logs"
     if not os.path.exists(logs_dir):
         await message.answer("📂 Папка с логами пуста.")
@@ -163,19 +165,31 @@ async def cmd_get_logs(message: Message):
             await message.answer("📂 Нет активных сессий.")
             return
 
-        latest_session = max(subdirs, key=os.path.getmtime)
-        session_name = os.path.basename(latest_session)
+        # Находим самую свежую папку
+        latest_session_path = max(subdirs, key=os.path.getmtime)
+        session_name = os.path.basename(latest_session_path)
 
-        # await message.answer(f"📦 Собираю логи: {session_name}...")
+        await message.answer(f"☁️ Начинаю выгрузку в облако: {session_name}...")
 
-        shutil.make_archive(session_name, 'zip', latest_session)
-        logfile = FSInputFile(f"{session_name}.zip")
-        await message.answer_document(logfile, caption=f"🗂 Логи сессии: {session_name}")
-        os.remove(f"{session_name}.zip")
+        # Запускаем загрузку в S3 (в отдельном потоке)
+        success = await asyncio.to_thread(s3_uploader.upload_session_folder, latest_session_path)
+
+        if success:
+            await message.answer(f"✅ Логи успешно сохранены в S3!\nПапка: <code>{session_name}</code>",
+                                 parse_mode="HTML")
+
+            # Очистка диска (важно для Koyeb)
+            try:
+                shutil.rmtree(latest_session_path)
+                print(f"🗑️ Deleted local folder: {session_name}")
+            except Exception as e:
+                print(f"⚠️ Cleanup warning: {e}")
+        else:
+            await message.answer("⚠️ Не удалось загрузить логи в S3 (проверьте консоль).")
 
     except Exception as e:
         print(f"Log Error: {e}")
-        await message.answer(f"❌ Не удалось собрать логи: {e}")
+        await message.answer(f"❌ Ошибка при работе с логами: {e}")
 
 
 @router.callback_query(F.data == "start_game")
@@ -385,13 +399,8 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
     players = [PlayerProfile(**p) for p in data["players"]]
     survivors = [p for p in players if p.name != loser_name]
 
-    # --- АВТОМАТИЧЕСКАЯ ОТПРАВКА ЛОГОВ ПОСЛЕ ИГРЫ (для Free Tier без Volumes) ---
+    # --- АВТОМАТИЧЕСКАЯ ОТПРАВКА ЛОГОВ В S3 ---
     async def send_logs_auto():
-        # Создаем фейковое сообщение, чтобы переиспользовать код cmd_get_logs
-        # (Это немного хак, но рабочий и быстрый)
-        dummy_msg = Message(message_id=0, date=datetime.datetime.now(), chat=bot.get_chat(chat_id=chat_id))
-        # Присваиваем боту и чату правильные атрибуты вручную, если нужно,
-        # но проще просто скопировать логику отправки:
         try:
             logs_dir = "Logs"
             if os.path.exists(logs_dir):
@@ -399,26 +408,37 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
                            os.path.isdir(os.path.join(logs_dir, d))]
                 if subdirs:
                     latest = max(subdirs, key=os.path.getmtime)
-                    name = os.path.basename(latest)
-                    shutil.make_archive(name, 'zip', latest)
-                    await bot.send_document(chat_id, FSInputFile(f"{name}.zip"),
-                                            caption=f"🏁 Игра окончена. Логи: {name}")
-                    os.remove(f"{name}.zip")
+                    folder_name = os.path.basename(latest)
+
+                    # Загрузка
+                    success = await asyncio.to_thread(s3_uploader.upload_session_folder, latest)
+
+                    if success:
+                        await bot.send_message(chat_id, f"💾 Логи игры <b>{folder_name}</b> сохранены в облако.",
+                                               parse_mode="HTML")
+                        # Очистка
+                        try:
+                            shutil.rmtree(latest)
+                            print(f"🗑️ Auto-cleaned: {folder_name}")
+                        except Exception as e:
+                            print(f"⚠️ Clean error: {e}")
+                    else:
+                        print(f"⚠️ S3 Auto-upload failed for {folder_name}")
         except Exception as e:
-            print(f"Auto-log error: {e}")
+            print(f"Auto-log critical error: {e}")
 
     # --------------------------------------------------------------------------
 
     if not any(p.is_human for p in survivors):
         await bot.send_message(chat_id, "💀 <b>GAME OVER</b>. Вы погибли.", parse_mode="HTML")
-        await send_logs_auto()  # Шлем логи
+        await send_logs_auto()
         await state.clear()
         return
 
     if len(survivors) <= cfg.gameplay["rounds"]["target_survivors"]:
         names = ", ".join([p.name for p in survivors])
         await bot.send_message(chat_id, f"🎉 <b>ПОБЕДА!</b> Выжили: {names}", parse_mode="HTML")
-        await send_logs_auto()  # Шлем логи
+        await send_logs_auto()
         await state.clear()
         return
 
@@ -482,8 +502,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    import datetime  # Нужен для хака с датой в авто-логах
-
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):

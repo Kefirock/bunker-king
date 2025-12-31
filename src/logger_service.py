@@ -31,7 +31,7 @@ class GameLogger:
             "HUMAN_TURN": "👉", "VOTE_RESULTS": "📊"
         }
 
-        # Создаем базовую папку (если Volume не подключен, создастся локально)
+        # Создаем базовую папку
         os.makedirs(self.base_log_dir, exist_ok=True)
         self._setup_console_logging()
 
@@ -52,6 +52,8 @@ class GameLogger:
         # Глушим шум библиотек
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("aiogram").setLevel(logging.INFO)
+        logging.getLogger("boto3").setLevel(logging.WARNING)
+        logging.getLogger("botocore").setLevel(logging.WARNING)
 
     def _create_file_logger(self, name: str, filepath: str):
         """Создает отдельный логгер, который пишет ТОЛЬКО в файл."""
@@ -69,28 +71,37 @@ class GameLogger:
 
     def new_session(self, username: str) -> None:
         """Создает папку сессии и файлы."""
-        safe_name = re.sub(r'[\\/*?:"<>|]', "", username).strip() or "Unknown"
+        # 1. Очистка имени пользователя для безопасности файловой системы
+        safe_name = re.sub(r'[\\/*?:"<>| ]', "_", username).strip() or "Unknown"
+
+        # 2. Таймстемп
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-        folder_name = f"Session_{timestamp}_{safe_name}"
+        # 3. Формируем имя папки по ТЗ: Username_Date_Time
+        folder_name = f"{safe_name}_{timestamp}"
+
         self.current_session_dir = os.path.join(self.base_log_dir, folder_name)
         os.makedirs(self.current_session_dir, exist_ok=True)
 
-        # 1. Лог чата
-        self.chat_logger = self._create_file_logger(f"chat_{timestamp}",
-                                                    os.path.join(self.current_session_dir, "chat_history.log"))
+        # 4. Создаем файлы с фиксированными именами внутри уникальной папки
+        self.chat_logger = self._create_file_logger(
+            f"chat_{timestamp}",
+            os.path.join(self.current_session_dir, "chat_history.log")
+        )
 
-        # 2. Лог логики игры
-        self.logic_logger = self._create_file_logger(f"logic_{timestamp}",
-                                                     os.path.join(self.current_session_dir, "game_logic.log"))
+        self.logic_logger = self._create_file_logger(
+            f"logic_{timestamp}",
+            os.path.join(self.current_session_dir, "game_logic.log")
+        )
 
-        # 3. Сырой лог (LLM JSONs)
-        self.raw_logger = self._create_file_logger("LLM_RAW",
-                                                   os.path.join(self.current_session_dir, "raw_debug.log"))
+        self.raw_logger = self._create_file_logger(
+            "LLM_RAW",
+            os.path.join(self.current_session_dir, "raw_debug.log")
+        )
 
         start_msg = f"=== NEW SESSION STARTED: {username} ==="
         logging.info(start_msg)  # В консоль
-        self.logic_logger.info(start_msg)  # В файл
+        if self.logic_logger: self.logic_logger.info(start_msg)  # В файл
 
     def log_chat_message(self, speaker: str, message: str) -> None:
         msg = f"[{speaker}]: {message}"

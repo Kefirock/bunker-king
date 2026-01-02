@@ -5,10 +5,13 @@ from src.schemas import PlayerProfile, Persona, GameState
 
 
 class GameSetup:
+    # src/utils.py
     @staticmethod
-    def generate_players(user_name: str) -> List[PlayerProfile]:
+    def generate_players(user_data: list | str) -> List[PlayerProfile]:
         """
-        Создает список игроков: Люди + Боты, заполняя слоты до total_players.
+        user_data:
+          - Если str: Имя одного игрока (Соло режим)
+          - Если list: Список словарей [{'name': 'Max', 'id': 123}, ...] (Мультиплеер)
         """
         scenarios = cfg.scenarios
         profs = scenarios["professions"][:]
@@ -23,20 +26,24 @@ class GameSetup:
 
         players = []
 
-        # 1. Настройки количества
-        human_count = 1
+        # 1. Определяем список людей
+        humans_to_create = []
+        if isinstance(user_data, str):
+            humans_to_create.append({"name": user_data})
+        elif isinstance(user_data, list):
+            humans_to_create = user_data
+
+        # 2. Сколько нужно ботов?
+        # Читаем конфиг setup.total_players (по умолчанию 5)
         target_total = cfg.gameplay.get("setup", {}).get("total_players", 5)
+        human_count = len(humans_to_create)
         bots_needed = max(0, target_total - human_count)
 
-        # 2. Создаем БОТОВ
+        # 3. Создаем БОТОВ
         for i in range(bots_needed):
-            if names:
-                bot_name = names.pop()
-            else:
-                bot_name = f"Bot-{i + 1}"
-
-            bot_prof = profs.pop() if profs else "Безработный"
-            bot_trait = traits.pop() if traits else "Обычный человек"
+            bot_name = names.pop() if names else f"Bot-{i + 1}"
+            bot_prof = profs.pop() if profs else "Выживший"
+            bot_trait = traits.pop() if traits else "Обычный"
 
             p_data = random.choice(personalities_data)
             persona = Persona(
@@ -46,32 +53,31 @@ class GameSetup:
                 multipliers=p_data.get("multipliers", {})
             )
 
-            bot = PlayerProfile(
+            players.append(PlayerProfile(
                 name=bot_name,
                 profession=bot_prof,
                 trait=bot_trait,
                 personality=persona,
                 is_human=False,
                 llm_config=random.choice(bot_models)
-            )
-            players.append(bot)
+            ))
 
-        # 3. Создаем ЧЕЛОВЕКА
-        human_persona = Persona(
-            id="human",
-            description="Игрок",
-            style_example="",
-            multipliers={}
-        )
+        # 4. Создаем ЛЮДЕЙ
+        human_persona = Persona(id="human", description="Игрок", style_example="", multipliers={})
 
-        human = PlayerProfile(
-            name=f"{user_name} (Вы)",
-            profession=profs.pop() if profs else "Выживший",
-            trait=traits.pop() if traits else "Счастливчик",
-            personality=human_persona,
-            is_human=True
-        )
-        players.append(human)
+        for h in humans_to_create:
+            p_name = h["name"]
+            # Если это соло, добавляем (Вы), если мульти - оставляем ник
+            display_name = f"{p_name} (Вы)" if isinstance(user_data, str) else p_name
+
+            players.append(PlayerProfile(
+                name=display_name,
+                profession=profs.pop() if profs else "Выживший",
+                trait=traits.pop() if traits else "Счастливчик",
+                personality=human_persona,
+                is_human=True,
+                # Важно: для мультиплеера можно сохранить ID юзера в поле (хак через personality или отдельное поле, но пока так)
+            ))
 
         random.shuffle(players)
         return players

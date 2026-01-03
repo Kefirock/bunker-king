@@ -288,17 +288,14 @@ async def process_turn(chat_id: int, state: FSMContext):
     actual_topic = get_display_topic(gs, current_player.trait, cat_data)
 
     if current_player.is_human:
-        kb = GameSetup.get_turn_keyboard(gs.phase)
-        # ВАЖНО: ВАШ ХОД (как просил)
-        await bot.send_message(chat_id, f"👉 <b>ВАШ ХОД!</b>\nТема: {actual_topic}", reply_markup=kb, parse_mode="HTML")
+        # Убрана ReplyKeyboard
+        await bot.send_message(chat_id, f"👉 <b>ВАШ ХОД!</b>\nТема: {actual_topic}", parse_mode="HTML")
 
         await state.update_data(game_state=gs.model_dump())
         await state.set_state(GameFSM.HumanTurn)
         return
     else:
         await bot.send_chat_action(chat_id, "typing")
-
-        # ВАЖНО: Строгий формат для бота: "⏳ Ходит игрок {name}..."
         typing_msg = await bot.send_message(chat_id, f"⏳ Ходит игрок <b>{current_player.name}</b>...",
                                             parse_mode="HTML")
 
@@ -308,8 +305,6 @@ async def process_turn(chat_id: int, state: FSMContext):
         if logger: logger.log_chat_message(current_player.name, speech)
 
         display_name = GameSetup.get_display_name(current_player, gs.round)
-
-        # Редактируем: текст меняется на речь
         try:
             await bot.edit_message_text(
                 text=f"🤖 {display_name}:\n{speech}",
@@ -340,20 +335,6 @@ async def human_turn_handler(message: Message, state: FSMContext):
     cat_data = data.get("catastrophe", {})
     logger = solo_sessions.get(message.chat.id)
 
-    me_obj = next((p for p in players if p.is_human), None)
-
-    template_response = GameSetup.get_template_text(message.text, me_obj)
-    if template_response:
-        try:
-            await message.delete()
-        except:
-            pass
-        await message.answer(
-            f"💡 <b>Подсказка:</b>\nСкопируйте и дополните:\n<code>{template_response}</code>",
-            parse_mode="HTML"
-        )
-        return
-
     text_to_process = message.text
 
     if gs.phase == "runoff":
@@ -371,8 +352,8 @@ async def human_turn_handler(message: Message, state: FSMContext):
 
     gs.history.append(f"[{player.name}]: {text_to_process}")
 
-    rm_kb = ReplyKeyboardRemove()
-    wait_msg = await message.answer("✅ Ответ принят.", reply_markup=rm_kb)
+    # Сообщение о принятии, удаляется
+    wait_msg = await message.answer("✅ Ответ принят.")
     await asyncio.sleep(0.5)
     try:
         await wait_msg.delete()
@@ -675,7 +656,6 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
     await process_multi_turn(lobby, bot)
 
 
-# --- ВОССТАНОВЛЕННЫЕ КОМАНДЫ ДЕБАГА ---
 @router.message(Command("fake_join"))
 async def cmd_fake_join(message: Message):
     lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
@@ -716,6 +696,14 @@ async def cmd_vote_as(message: Message):
     target_name = args[2]
     lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
     if not lobby or lobby.status != "playing": return
+
+    # Строгая проверка имени цели
+    alive_names = [p.name for p in lobby.game_players if p.is_alive]
+    if target_name not in alive_names:
+        valid_str = ", ".join(alive_names)
+        await message.answer(f"⚠️ Игрока с именем '<b>{target_name}</b>' нет (или мертв).\nДоступные цели: {valid_str}")
+        return
+
     try:
         await message.delete()
     except:

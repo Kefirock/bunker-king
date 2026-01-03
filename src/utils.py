@@ -1,6 +1,5 @@
 import random
 from typing import List, Union, Dict
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from src.config import cfg
 from src.schemas import PlayerProfile, Persona, GameState
 
@@ -174,47 +173,3 @@ class GameSetup:
             report += f"- {GameSetup.get_display_name(p, 999, reveal_all=True)}\n"
 
         return report
-
-    @staticmethod
-    def get_turn_keyboard(phase: str) -> ReplyKeyboardMarkup:
-        """Возвращает клавиатуру с подсказками в зависимости от фазы."""
-        buttons = []
-
-        if phase == "presentation":
-            buttons = [
-                [KeyboardButton(text="👤 Представиться"), KeyboardButton(text="💼 О профессии")]
-            ]
-        elif phase == "discussion":
-            buttons = [
-                [KeyboardButton(text="🛡 Защититься"), KeyboardButton(text="⚔️ Атаковать")],
-                [KeyboardButton(text="🤝 Поддержать"), KeyboardButton(text="❓ Задать вопрос")]
-            ]
-        elif phase == "runoff":
-            buttons = [
-                [KeyboardButton(text="🗣 Финальная речь")]
-            ]
-
-        if not buttons:
-            return None
-
-        return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True,
-                                   input_field_placeholder="Ваш ход...")
-
-    @staticmethod
-    def get_template_text(btn_text: str, player: PlayerProfile) -> str:
-        """Возвращает шаблон текста при нажатии кнопки."""
-        if "Представиться" in btn_text:
-            return f"Всем привет. Я {player.name}, и я..."
-        if "О профессии" in btn_text:
-            return f"Я работаю как {player.profession}. В бункере это полезно тем, что..."
-        if "Защититься" in btn_text:
-            return "Я не согласен с обвинениями. Моя польза очевидна: ..."
-        if "Атаковать" in btn_text:
-            return "Меня смущает поведение... Мне кажется, он скрывает..."
-        if "Поддержать" in btn_text:
-            return "Я согласен с аргументами..."
-        if "Задать вопрос" in btn_text:
-            return "У меня вопрос к..."
-        if "Финальная речь" in btn_text:
-            return "Вы совершаете ошибку. Я должен остаться, потому что..."
-        return ""

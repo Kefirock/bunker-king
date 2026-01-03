@@ -139,23 +139,17 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
     if current_player.is_human:
         target_user = next((p for p in lobby.players if p["name"] == current_player.name), None)
         if target_user:
-            # 1. Всем остальным: Ходит...
-            # СТРОГИЙ ФОРМАТ
             await broadcast_turn_start(lobby, f"⏳ Ходит игрок <b>{current_player.name}</b>...", bot,
                                        exclude_id=target_user["user_id"])
 
-            # 2. Игроку: ВАШ ХОД
-            kb = GameSetup.get_turn_keyboard(gs.phase)
             msg_text = f"👉 <b>ВАШ ХОД!</b>\nТема: {actual_topic}\nНапиши сообщение в чат."
 
             if target_user["user_id"] < 0:
                 msg_text = f"<b>[DEBUG for {target_user['name']}]</b>\n{msg_text}"
 
-            await bot.send_message(target_user["chat_id"], msg_text, reply_markup=kb, parse_mode="HTML")
+            await bot.send_message(target_user["chat_id"], msg_text, parse_mode="HTML")
             return
     else:
-        # Бот. Всем: Ходит...
-        # СТРОГИЙ ФОРМАТ
         await broadcast_turn_start(lobby, f"⏳ Ходит игрок <b>{current_player.name}</b>...", bot)
 
         temp_gs = gs.model_copy()
@@ -186,15 +180,6 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
         return
 
     if current_player.name != user_name: return
-
-    # Проверка на шаблон подсказки
-    template_resp = GameSetup.get_template_text(text, current_player)
-    if template_resp:
-        user_p = next((p for p in lobby.players if p["name"] == user_name), None)
-        if user_p:
-            await bot.send_message(user_p["chat_id"], f"💡 <b>Подсказка:</b>\nСкопируйте: <code>{template_resp}</code>",
-                                   parse_mode="HTML")
-        return
 
     lobby.game_state.history.append(f"[{current_player.name}]: {text}")
 
@@ -232,6 +217,15 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
     for p in lobby.players:
         game_p_self = next((gp for gp in lobby.game_players if gp.name == p["name"]), None)
         if not game_p_self or not game_p_self.is_alive: continue
+
+        # Логика для фейков (Debug)
+        if p["user_id"] < 0:
+            debug_msg = f"🔧 [DEBUG] Голосование для <b>{p['name']}</b>. Используйте:\n<code>/vote_as {p['name']} [Цель]</code>"
+            try:
+                await bot.send_message(p["chat_id"], debug_msg, parse_mode="HTML")
+            except:
+                pass
+            continue
 
         valid_targets = []
         if lobby.game_state.runoff_candidates:

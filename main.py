@@ -152,7 +152,7 @@ async def cmd_start(message: Message, state: FSMContext):
 async def solo_mode_entry(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
-    await callback.message.edit_text("<b>👤 SOLO MODE</b>\nВы будете играть с 4 ботами.", reply_markup=kb.as_markup(),
+    await callback.message.edit_text("<b>👤 SOLO MODE</b>\nВы будете играть с ботами.", reply_markup=kb.as_markup(),
                                      parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
 

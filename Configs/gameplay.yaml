@@ -43,7 +43,6 @@ voting:
   max_runoffs: 1
 
 # --- НАСТРОЙКИ ТУМАНА ВОЙНЫ ---
-# Убрал show_status, оставил только логику раскрытия черты (Trait)
 visibility:
   round_1:
     show_trait: false

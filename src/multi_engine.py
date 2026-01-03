@@ -1,8 +1,8 @@
 import asyncio
-import shutil  # <--- ВОТ ЭТОГО НЕ ХВАТАЛО
+import shutil
 from collections import Counter
 from aiogram import Bot
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.config import cfg
@@ -18,6 +18,9 @@ bot_engine = BotEngine()
 judge_service = JudgeService()
 director_engine = DirectorEngine()
 
+
+# get_topic_base и get_display_topic дублируются или импортируются из main/utils
+# (лучше вынести их в utils, но для совместимости оставим локальные хелперы или возьмем логику)
 
 def get_topic_base(round_num, trait="", cat_data=None):
     topics_cfg = cfg.gameplay["rounds"]["topics"]
@@ -43,21 +46,15 @@ def get_display_topic(gs: GameState, p: PlayerProfile, cat_data: dict) -> str:
     return "..."
 
 
-# --- УПРАВЛЕНИЕ СООБЩЕНИЯМИ (С удалением лишнего) ---
-
+# --- УПРАВЛЕНИЕ СООБЩЕНИЯМИ ---
 async def broadcast_turn_start(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None):
-    """Отправляет 'Ходит...' и запоминает ID сообщений."""
-    # Лог системы
     if lobby.logger: lobby.logger.log_chat_message("SYSTEM", text)
-
     lobby.turn_messages.clear()
 
     for p in lobby.players:
         if exclude_id and p["user_id"] == exclude_id: continue
-
         final_text = text
         if p["user_id"] < 0: final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
-
         try:
             msg = await bot.send_message(p["chat_id"], final_text, parse_mode="HTML")
             lobby.turn_messages[p["user_id"]] = msg.message_id
@@ -67,16 +64,11 @@ async def broadcast_turn_start(lobby: Lobby, text: str, bot: Bot, exclude_id: in
 
 
 async def broadcast_speech(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None):
-    """Редактирует старое сообщение 'Ходит...' на речь игрока."""
-    # Лог речи (уже залогировано в process_turn/handle_human, но на всякий случай тут не дублируем)
-
     for p in lobby.players:
         if exclude_id and p["user_id"] == exclude_id: continue
-
         final_text = text
         if p["user_id"] < 0: final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
 
-        # Пытаемся редактировать
         msg_id_to_edit = lobby.turn_messages.get(p["user_id"])
         sent = False
         if msg_id_to_edit:
@@ -86,36 +78,29 @@ async def broadcast_speech(lobby: Lobby, text: str, bot: Bot, exclude_id: int = 
                 sent = True
             except:
                 sent = False
-
-        # Если не вышло - шлем новое
         if not sent:
             try:
                 await bot.send_message(p["chat_id"], final_text, parse_mode="HTML")
             except:
                 pass
-
         if p["user_id"] < 0: await asyncio.sleep(0.3)
-
     lobby.turn_messages.clear()
 
 
 async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None, reply_markup=None):
-    """Обычная рассылка (для уведомлений, итогов и т.д.)"""
     if lobby.logger: lobby.logger.log_chat_message("SYSTEM", text)
     for p in lobby.players:
         if exclude_id and p["user_id"] == exclude_id: continue
-        target_chat_id = p["chat_id"]
         final_text = text
         if p["user_id"] < 0: final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
         try:
-            await bot.send_message(target_chat_id, final_text, parse_mode="HTML", reply_markup=reply_markup)
+            await bot.send_message(p["chat_id"], final_text, parse_mode="HTML", reply_markup=reply_markup)
             if p["user_id"] < 0: await asyncio.sleep(0.3)
         except:
             pass
 
-    # --- ДВИЖОК ---
 
-
+# --- ДВИЖОК ---
 async def process_multi_turn(lobby: Lobby, bot: Bot):
     if not lobby.game_state: return
     gs = lobby.game_state
@@ -125,7 +110,11 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
         if gs.phase == "presentation":
             gs.phase = "discussion"
             lobby.current_turn_index = 0
-            await broadcast(lobby, f"⚔️ <b>ФАЗА 2: ОБСУЖДЕНИЕ</b>", bot)
+
+            # Визуальный разделитель
+            sep = "=========================\n⚔️ <b>ФАЗА 2: ОБСУЖДЕНИЕ</b>\n========================="
+            await broadcast(lobby, sep, bot)
+
             await asyncio.sleep(1)
             await process_multi_turn(lobby, bot)
             return
@@ -154,19 +143,23 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
     if current_player.is_human:
         target_user = next((p for p in lobby.players if p["name"] == current_player.name), None)
         if target_user:
-            # 1. Объявляем "Ходит..."
+            # 1. Всем остальным: Ходит...
             await broadcast_turn_start(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot,
                                        exclude_id=target_user["user_id"])
 
-            # 2. Личка
+            # 2. Игроку: Клавиатура с подсказками
+            kb = GameSetup.get_turn_keyboard(gs.phase)
             msg_text = f"👤 <b>ТВОЙ ХОД!</b>\nТема: {actual_topic}\nНапиши сообщение в чат."
+
             if target_user["user_id"] < 0:
+                # Фейк бот
                 msg_text = f"<b>[DEBUG for {target_user['name']}]</b>\n{msg_text}"
-            await bot.send_message(target_user["chat_id"], msg_text, parse_mode="HTML")
+
+            await bot.send_message(target_user["chat_id"], msg_text, reply_markup=kb, parse_mode="HTML")
             return
     else:
-        # 1. Объявляем "Ходит..."
-        await broadcast_turn_start(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot)
+        # Бот
+        await broadcast_turn_start(lobby, f"⏳ <i>{current_player.name} обдумывает ответ...</i>", bot)
 
         temp_gs = gs.model_copy()
         temp_gs.topic = actual_topic
@@ -177,9 +170,8 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
         gs.history.append(f"[{current_player.name}]: {speech}")
         if lobby.logger: lobby.logger.log_chat_message(current_player.name, speech)
 
-        # 2. Заменяем на речь
         display_name = GameSetup.get_display_name(current_player, gs.round)
-        await broadcast_speech(lobby, f"🤖 <b>{display_name}</b>:\n{speech}", bot)
+        await broadcast_speech(lobby, f"🤖 {display_name}:\n{speech}", bot)
 
         lobby.current_turn_index += 1
         await asyncio.sleep(2)
@@ -198,6 +190,16 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
 
     if current_player.name != user_name: return
 
+    # Проверка на шаблон подсказки
+    template_resp = GameSetup.get_template_text(text, current_player)
+    if template_resp:
+        # Ищем юзера чтобы ответить ему в лс или чат
+        user_p = next((p for p in lobby.players if p["name"] == user_name), None)
+        if user_p:
+            await bot.send_message(user_p["chat_id"], f"💡 <b>Подсказка:</b>\nСкопируйте: <code>{template_resp}</code>",
+                                   parse_mode="HTML")
+        return  # Не ход
+
     lobby.game_state.history.append(f"[{current_player.name}]: {text}")
 
     if lobby.logger:
@@ -209,9 +211,13 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
     for p in lobby.players:
         if p["name"] == user_name:
             author_user_id = p["user_id"]
+            # Убираем клавиатуру у автора
+            try:
+                await bot.send_message(p["chat_id"], "✅ Принято.", reply_markup=ReplyKeyboardRemove())
+            except:
+                pass
             break
 
-    # Заменяем "Ходит..." на речь человека у других
     display_name = GameSetup.get_display_name(current_player, lobby.game_state.round)
     await broadcast_speech(lobby, f"👤 <b>{display_name}</b>:\n{text}", bot, exclude_id=author_user_id)
 
@@ -220,7 +226,6 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
 
 
 # --- ГОЛОСОВАНИЕ ---
-
 async def start_multi_voting(lobby: Lobby, bot: Bot):
     lobby.votes.clear()
     title = "ГОЛОСОВАНИЕ"
@@ -238,19 +243,6 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
             valid_targets = [t for t in lobby.game_players if t.name in lobby.game_state.runoff_candidates]
         else:
             valid_targets = [t for t in lobby.game_players if t.is_alive]
-
-        if p["user_id"] < 0:
-            candidates = []
-            for target in valid_targets:
-                if target.name == p["name"] and not cfg.gameplay["voting"]["allow_self_vote"]: continue
-                candidates.append(target.name)
-            cand_str = " | ".join(candidates)
-            debug_msg = f"🗳 <b>[DEBUG {p['name']}] {title}!</b>\nВарианты: {cand_str}"
-            try:
-                await bot.send_message(p["chat_id"], debug_msg, parse_mode="HTML")
-            except:
-                pass
-            continue
 
         kb = InlineKeyboardBuilder()
         for target in valid_targets:
@@ -290,17 +282,23 @@ async def finish_voting(lobby: Lobby, bot: Bot):
 
     leader_name, leader_votes = results[0]
     leaders = [name for name, count in results if count == leader_votes]
+
+    # Визуализация
+    total_votes = sum(counts.values())
     result_text = "📊 <b>ИТОГИ ГОЛОСОВАНИЯ:</b>\n"
-    for name, cnt in counts.items(): result_text += f"- {name}: {cnt}\n"
+    for name, cnt in counts.items():
+        bar_len = int((cnt / total_votes) * 10)
+        bar = "█" * bar_len + "░" * (10 - bar_len)
+        result_text += f"<code>{bar}</code> {cnt} - {name}\n"
 
     if lobby.logger: lobby.logger.log_game_event("VOTE_RESULTS", str(dict(counts)))
     gs = lobby.game_state
 
     if len(leaders) > 1:
         if gs.runoff_count >= 1:
-            await broadcast(lobby, f"{result_text}\n⚖️ <b>НИЧЬЯ №2!</b>\n🚫 <b>БУНКЕР ЗАКРЫЛСЯ.</b>\n💀 <b>GAME OVER</b>",
-                            bot)
-            await close_multi_lobby(lobby)
+            report = GameSetup.generate_game_report(lobby.game_players)
+            await broadcast(lobby, f"{result_text}\n⚖️ <b>НИЧЬЯ №2! БУНКЕР ЗАКРЫТ.</b>\n{report}", bot)
+            await close_multi_lobby(lobby, bot)
             return
         gs.phase = "runoff"
         gs.runoff_candidates = leaders
@@ -318,26 +316,32 @@ async def finish_voting(lobby: Lobby, bot: Bot):
             p.is_alive = False
             break
 
+    # Обновляем инфу про кик
     leader_user = next((p for p in lobby.players if p["name"] == leader_name), None)
     if leader_user:
+        # Личное сообщение изгнанному
+        report = GameSetup.generate_game_report(lobby.game_players)
         try:
-            msg = "💀 <b>GAME OVER</b>. Вас изгнали."
-            if leader_user["user_id"] < 0: msg = f"<b>[DEBUG {leader_name}]</b> {msg}"
-            await bot.send_message(leader_user["chat_id"], msg, parse_mode="HTML")
+            kb = InlineKeyboardBuilder()
+            kb.add(InlineKeyboardButton(text="🔄 В Меню", callback_data="back_to_menu"))
+            await bot.send_message(leader_user["chat_id"], f"💀 <b>ВАС ИЗГНАЛИ.</b>\n{report}",
+                                   reply_markup=kb.as_markup(), parse_mode="HTML")
             lobby.remove_player(leader_user["user_id"])
         except:
             pass
 
     humans_alive = any(p.is_human and p.is_alive for p in lobby.game_players)
     if not humans_alive:
-        await broadcast(lobby, "💀 <b>GAME OVER</b>. Все люди погибли.", bot)
-        await close_multi_lobby(lobby)
+        report = GameSetup.generate_game_report(lobby.game_players)
+        await broadcast(lobby, f"💀 <b>GAME OVER</b>. Все люди погибли.\n{report}", bot)
+        await close_multi_lobby(lobby, bot)
         return
     survivors_count = sum(1 for p in lobby.game_players if p.is_alive)
     if survivors_count <= cfg.gameplay["rounds"]["target_survivors"]:
+        report = GameSetup.generate_game_report(lobby.game_players)
         names = ", ".join([p.name for p in lobby.game_players if p.is_alive])
-        await broadcast(lobby, f"🎉 <b>ПОБЕДА!</b> Выжили: {names}", bot)
-        await close_multi_lobby(lobby)
+        await broadcast(lobby, f"🎉 <b>ПОБЕДА!</b> Выжили: {names}\n{report}", bot)
+        await close_multi_lobby(lobby, bot)
         return
 
     gs.round += 1
@@ -348,13 +352,22 @@ async def finish_voting(lobby: Lobby, bot: Bot):
     gs.runoff_count = 0
     base_topic = get_topic_base(gs.round, "...", lobby.catastrophe_data)
     gs.topic = base_topic
-    await asyncio.sleep(3)
-    await broadcast(lobby, f"🔔 <b>РАУНД {gs.round}</b>\nТема: {base_topic}", bot)
+
+    await asyncio.sleep(2)
+
+    sep = f"━━━━━━━━━━━━━━━━━━━\n🔥 <b>РАУНД {gs.round}</b>\n━━━━━━━━━━━━━━━━━━━\n<blockquote>{base_topic}</blockquote>"
+    await broadcast(lobby, sep, bot)
+
     await process_multi_turn(lobby, bot)
 
 
-async def close_multi_lobby(lobby: Lobby):
+async def close_multi_lobby(lobby: Lobby, bot: Bot):
     lobby.status = "finished"
+    # Рассылаем всем кнопку Выхода
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="🔄 В Меню", callback_data="back_to_menu"))
+    await broadcast(lobby, "Игра окончена.", bot, reply_markup=kb.as_markup())
+
     if lobby.logger:
         try:
             path = lobby.logger.get_session_path()

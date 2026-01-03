@@ -1,5 +1,6 @@
 import random
 from typing import List, Union, Dict
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from src.config import cfg
 from src.schemas import PlayerProfile, Persona, GameState
 
@@ -86,20 +87,146 @@ class GameSetup:
         )
 
     @staticmethod
-    def get_display_name(p: PlayerProfile, round_num: int) -> str:
+    def get_display_name(p: PlayerProfile, round_num: int, reveal_all: bool = False) -> str:
         """
-        Формат: Имя: Профессия [, Черта]
-        Статус и факторы скрыты от игроков.
+        Формирует строку для отображения игрока в списке.
+        reveal_all: Если True (конец игры), показывает всё.
         """
         visibility_rules = cfg.get_visibility(round_num)
 
-        # Профессия видна всегда (если только не добавить в конфиг явный запрет)
         prof = p.profession if p.profession else "???"
 
-        # Черта - зависит от раунда
-        if visibility_rules.get("show_trait", False):
-            trait = f", {p.trait}"
-        else:
-            trait = ""
+        # Статус (жив/мертв)
+        prefix = "" if p.is_alive else "💀 "
 
-        return f"{p.name}: {prof}{trait}"
+        if reveal_all:
+            # Полное раскрытие в конце
+            role_info = "Импостор" if p.status == "IMPOSTOR" else p.status
+            return f"{prefix}<b>{p.name}</b>: {prof}, {p.trait} [{role_info}]"
+
+        # Обычный режим (Туман войны)
+        trait = "???"
+        if visibility_rules.get("show_trait", False):
+            trait = p.trait
+
+        status_marker = " (Изгнан)" if not p.is_alive else ""
+
+        return f"{prefix}<b>{p.name}</b>: {prof} [{trait}]{status_marker}"
+
+    @staticmethod
+    def generate_dashboard(game_state: GameState, players: List[PlayerProfile], viewer_name: str = None) -> str:
+        """
+        Генерирует текст для Закрепленного сообщения (Dashboard).
+        viewer_name: Имя игрока, который смотрит (чтобы показать ему ЕГО данные полностью).
+        """
+        gs = game_state
+
+        # Шапка
+        phase_map = {
+            "presentation": "ПРЕДСТАВЛЕНИЕ",
+            "discussion": "ОБСУЖДЕНИЕ",
+            "voting": "ГОЛОСОВАНИЕ",
+            "runoff": "ПЕРЕСТРЕЛКА"
+        }
+        phase_name = phase_map.get(gs.phase, gs.phase.upper())
+
+        # Выделяем тему как цитату
+        header = (
+            f"🔔 <b>РАУНД {gs.round}</b> | ФАЗА: {phase_name}\n"
+            f"<blockquote>{gs.topic}</blockquote>\n\n"
+            f"👥 <b>СПИСОК ВЫЖИВШИХ:</b>\n"
+        )
+
+        # Список всех
+        list_str = ""
+        viewer_profile = None
+
+        for p in players:
+            # Сохраняем профиль смотрящего для футера
+            if viewer_name and p.name.startswith(viewer_name):
+                viewer_profile = p
+            elif viewer_name and viewer_name in p.name:  # Fallback для имен типа "Bob (Вы)"
+                viewer_profile = p
+
+            list_str += f"- {GameSetup.get_display_name(p, gs.round)}\n"
+
+        # Футер (Личное досье)
+        footer = ""
+        if viewer_profile:
+            factors = ", ".join([f"{k}:{v}" for k, v in viewer_profile.active_factors.items()])
+            factors_str = f"\n⚠️ Факторы: {factors}" if factors else ""
+
+            footer = (
+                f"\n━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>ВАШЕ ДОСЬЕ (Видно только вам):</b>\n"
+                f"Профессия: <b>{viewer_profile.profession}</b>\n"
+                f"Черта: <b>{viewer_profile.trait}</b>\n"
+                f"Здоровье: {'Жив' if viewer_profile.is_alive else 'Мертв'}"
+                f"{factors_str}"
+            )
+
+        return header + list_str + footer
+
+    @staticmethod
+    def generate_game_report(players: List[PlayerProfile]) -> str:
+        """Финал игры: показывает все скрытые роли."""
+        report = "🏁 <b>ИГРА ОКОНЧЕНА. ИТОГИ:</b>\n\n"
+
+        survivors = [p for p in players if p.is_alive]
+        dead = [p for p in players if not p.is_alive]
+
+        report += "🏆 <b>ВЫЖИВШИЕ:</b>\n"
+        if not survivors:
+            report += "Никого...\n"
+        for p in survivors:
+            report += f"- {GameSetup.get_display_name(p, 999, reveal_all=True)}\n"
+
+        report += "\n💀 <b>ПОГИБШИЕ:</b>\n"
+        for p in dead:
+            report += f"- {GameSetup.get_display_name(p, 999, reveal_all=True)}\n"
+
+        return report
+
+    @staticmethod
+    def get_turn_keyboard(phase: str) -> ReplyKeyboardMarkup:
+        """Возвращает клавиатуру с подсказками в зависимости от фазы."""
+        buttons = []
+
+        if phase == "presentation":
+            buttons = [
+                [KeyboardButton(text="👤 Представиться"), KeyboardButton(text="💼 О профессии")]
+            ]
+        elif phase == "discussion":
+            buttons = [
+                [KeyboardButton(text="🛡 Защититься"), KeyboardButton(text="⚔️ Атаковать")],
+                [KeyboardButton(text="🤝 Поддержать"), KeyboardButton(text="❓ Задать вопрос")]
+            ]
+        elif phase == "runoff":
+            buttons = [
+                [KeyboardButton(text="🗣 Финальная речь")]
+            ]
+
+        if not buttons:
+            return None
+
+        return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True,
+                                   input_field_placeholder="Ваш ход...")
+
+    @staticmethod
+    def get_template_text(btn_text: str, player: PlayerProfile) -> str:
+        """Возвращает шаблон текста при нажатии кнопки."""
+        if "Представиться" in btn_text:
+            return f"Всем привет. Я {player.name}, и я..."
+        if "О профессии" in btn_text:
+            return f"Я работаю как {player.profession}. В бункере это полезно тем, что..."
+        if "Защититься" in btn_text:
+            return "Я не согласен с обвинениями. Моя польза очевидна: ..."
+        if "Атаковать" in btn_text:
+            return "Меня смущает поведение... Мне кажется, он скрывает..."
+        if "Поддержать" in btn_text:
+            return "Я согласен с аргументами..."
+        if "Задать вопрос" in btn_text:
+            return "У меня вопрос к..."
+        if "Финальная речь" in btn_text:
+            return "Вы совершаете ошибку. Я должен остаться, потому что..."
+        return ""

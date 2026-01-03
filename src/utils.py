@@ -89,8 +89,7 @@ class GameSetup:
     @staticmethod
     def get_display_name(p: PlayerProfile, round_num: int, reveal_all: bool = False) -> str:
         """
-        Формирует строку для отображения игрока в списке.
-        reveal_all: Если True (конец игры), показывает всё.
+        Формат: Имя - Профессия [, Черта]
         """
         visibility_rules = cfg.get_visibility(round_num)
 
@@ -101,27 +100,27 @@ class GameSetup:
 
         if reveal_all:
             # Полное раскрытие в конце
-            role_info = "Импостор" if p.status == "IMPOSTOR" else p.status
-            return f"{prefix}<b>{p.name}</b>: {prof}, {p.trait} [{role_info}]"
+            role_info = " (Импостор)" if p.status == "IMPOSTOR" else ""
+            return f"{prefix}<b>{p.name}</b> - {prof}, {p.trait}{role_info}"
 
         # Обычный режим (Туман войны)
-        trait = "???"
+        trait_part = ""
         if visibility_rules.get("show_trait", False):
-            trait = p.trait
+            trait_part = f", {p.trait}"
 
         status_marker = " (Изгнан)" if not p.is_alive else ""
 
-        return f"{prefix}<b>{p.name}</b>: {prof} [{trait}]{status_marker}"
+        # Формат: "Имя - Профессия" или "Имя - Профессия, Черта"
+        return f"{prefix}<b>{p.name}</b> - {prof}{trait_part}{status_marker}"
 
     @staticmethod
-    def generate_dashboard(game_state: GameState, players: List[PlayerProfile], viewer_name: str = None) -> str:
+    def generate_dashboard(game_state: GameState, players: List[PlayerProfile]) -> str:
         """
         Генерирует текст для Закрепленного сообщения (Dashboard).
-        viewer_name: Имя игрока, который смотрит (чтобы показать ему ЕГО данные полностью).
+        ТОЛЬКО общая информация.
         """
         gs = game_state
 
-        # Шапка
         phase_map = {
             "presentation": "ПРЕДСТАВЛЕНИЕ",
             "discussion": "ОБСУЖДЕНИЕ",
@@ -130,42 +129,31 @@ class GameSetup:
         }
         phase_name = phase_map.get(gs.phase, gs.phase.upper())
 
-        # Выделяем тему как цитату
         header = (
             f"🔔 <b>РАУНД {gs.round}</b> | ФАЗА: {phase_name}\n"
             f"<blockquote>{gs.topic}</blockquote>\n\n"
             f"👥 <b>СПИСОК ВЫЖИВШИХ:</b>\n"
         )
 
-        # Список всех
         list_str = ""
-        viewer_profile = None
-
         for p in players:
-            # Сохраняем профиль смотрящего для футера
-            if viewer_name and p.name.startswith(viewer_name):
-                viewer_profile = p
-            elif viewer_name and viewer_name in p.name:  # Fallback для имен типа "Bob (Вы)"
-                viewer_profile = p
-
             list_str += f"- {GameSetup.get_display_name(p, gs.round)}\n"
 
-        # Футер (Личное досье)
-        footer = ""
-        if viewer_profile:
-            factors = ", ".join([f"{k}:{v}" for k, v in viewer_profile.active_factors.items()])
-            factors_str = f"\n⚠️ Факторы: {factors}" if factors else ""
+        return header + list_str
 
-            footer = (
-                f"\n━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 <b>ВАШЕ ДОСЬЕ (Видно только вам):</b>\n"
-                f"Профессия: <b>{viewer_profile.profession}</b>\n"
-                f"Черта: <b>{viewer_profile.trait}</b>\n"
-                f"Здоровье: {'Жив' if viewer_profile.is_alive else 'Мертв'}"
-                f"{factors_str}"
-            )
+    @staticmethod
+    def generate_dossier(player: PlayerProfile) -> str:
+        """Генерирует текст личного досье."""
+        factors = ", ".join([f"{k}:{v}" for k, v in player.active_factors.items()])
+        factors_str = f"\n⚠️ Факторы: {factors}" if factors else ""
 
-        return header + list_str + footer
+        return (
+            f"📂 <b>ЛИЧНОЕ ДОСЬЕ</b>\n"
+            f"👤 <b>{player.name}</b>\n"
+            f"🛠 Профессия: <b>{player.profession}</b>\n"
+            f"🧬 Черта: <b>{player.trait}</b>\n"
+            f"{factors_str}"
+        )
 
     @staticmethod
     def generate_game_report(players: List[PlayerProfile]) -> str:

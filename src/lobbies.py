@@ -11,13 +11,14 @@ class Lobby:
         self.players: List[Dict] = []
         self.status = "waiting"
 
-        # Интерфейс
+        # Интерфейс меню
         self.menu_message_id: Optional[int] = None
 
-        # Логгер (инициализируется при старте игры)
-        self.logger = None
+        # Хранилище ID сообщений "Ходит..." для каждого игрока
+        # { user_id_получателя: message_id }
+        self.turn_messages: Dict[int, int] = {}
 
-        # Состояние игры
+        self.logger = None
         self.game_state: Optional[GameState] = None
         self.game_players = []
         self.current_turn_index = 0
@@ -33,6 +34,9 @@ class Lobby:
 
     def remove_player(self, user_id: int):
         self.players = [p for p in self.players if p["user_id"] != user_id]
+        # Очищаем мусор, если был
+        if user_id in self.turn_messages:
+            del self.turn_messages[user_id]
 
     def get_player_names(self):
         return [p["name"] for p in self.players]

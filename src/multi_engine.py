@@ -1,5 +1,5 @@
 import asyncio
-import shutil
+import shutil  # <--- ВОТ ЭТОГО НЕ ХВАТАЛО
 from collections import Counter
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton
@@ -43,29 +43,81 @@ def get_display_topic(gs: GameState, p: PlayerProfile, cat_data: dict) -> str:
     return "..."
 
 
-async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None, reply_markup=None):
-    if lobby.logger:
-        lobby.logger.log_chat_message("SYSTEM", text)
+# --- УПРАВЛЕНИЕ СООБЩЕНИЯМИ (С удалением лишнего) ---
+
+async def broadcast_turn_start(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None):
+    """Отправляет 'Ходит...' и запоминает ID сообщений."""
+    # Лог системы
+    if lobby.logger: lobby.logger.log_chat_message("SYSTEM", text)
+
+    lobby.turn_messages.clear()
 
     for p in lobby.players:
-        if exclude_id and p["user_id"] == exclude_id:
-            continue
+        if exclude_id and p["user_id"] == exclude_id: continue
 
+        final_text = text
+        if p["user_id"] < 0: final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
+
+        try:
+            msg = await bot.send_message(p["chat_id"], final_text, parse_mode="HTML")
+            lobby.turn_messages[p["user_id"]] = msg.message_id
+            if p["user_id"] < 0: await asyncio.sleep(0.3)
+        except:
+            pass
+
+
+async def broadcast_speech(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None):
+    """Редактирует старое сообщение 'Ходит...' на речь игрока."""
+    # Лог речи (уже залогировано в process_turn/handle_human, но на всякий случай тут не дублируем)
+
+    for p in lobby.players:
+        if exclude_id and p["user_id"] == exclude_id: continue
+
+        final_text = text
+        if p["user_id"] < 0: final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
+
+        # Пытаемся редактировать
+        msg_id_to_edit = lobby.turn_messages.get(p["user_id"])
+        sent = False
+        if msg_id_to_edit:
+            try:
+                await bot.edit_message_text(text=final_text, chat_id=p["chat_id"], message_id=msg_id_to_edit,
+                                            parse_mode="HTML")
+                sent = True
+            except:
+                sent = False
+
+        # Если не вышло - шлем новое
+        if not sent:
+            try:
+                await bot.send_message(p["chat_id"], final_text, parse_mode="HTML")
+            except:
+                pass
+
+        if p["user_id"] < 0: await asyncio.sleep(0.3)
+
+    lobby.turn_messages.clear()
+
+
+async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None, reply_markup=None):
+    """Обычная рассылка (для уведомлений, итогов и т.д.)"""
+    if lobby.logger: lobby.logger.log_chat_message("SYSTEM", text)
+    for p in lobby.players:
+        if exclude_id and p["user_id"] == exclude_id: continue
         target_chat_id = p["chat_id"]
         final_text = text
-        if p["user_id"] < 0:
-            final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
-
+        if p["user_id"] < 0: final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
         try:
             await bot.send_message(target_chat_id, final_text, parse_mode="HTML", reply_markup=reply_markup)
             if p["user_id"] < 0: await asyncio.sleep(0.3)
         except:
             pass
 
+    # --- ДВИЖОК ---
+
 
 async def process_multi_turn(lobby: Lobby, bot: Bot):
     if not lobby.game_state: return
-
     gs = lobby.game_state
     players = lobby.game_players
 
@@ -88,6 +140,7 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
         return
 
     current_player = players[lobby.current_turn_index]
+
     skip_turn = False
     if not current_player.is_alive: skip_turn = True
     if gs.phase == "runoff" and current_player.name not in gs.runoff_candidates: skip_turn = True
@@ -101,26 +154,32 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
     if current_player.is_human:
         target_user = next((p for p in lobby.players if p["name"] == current_player.name), None)
         if target_user:
-            await broadcast(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot, exclude_id=target_user["user_id"])
+            # 1. Объявляем "Ходит..."
+            await broadcast_turn_start(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot,
+                                       exclude_id=target_user["user_id"])
+
+            # 2. Личка
             msg_text = f"👤 <b>ТВОЙ ХОД!</b>\nТема: {actual_topic}\nНапиши сообщение в чат."
             if target_user["user_id"] < 0:
                 msg_text = f"<b>[DEBUG for {target_user['name']}]</b>\n{msg_text}"
             await bot.send_message(target_user["chat_id"], msg_text, parse_mode="HTML")
             return
     else:
-        await broadcast(lobby, f"🤖 <b>{current_player.name}</b> печатает...", bot)
+        # 1. Объявляем "Ходит..."
+        await broadcast_turn_start(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot)
+
         temp_gs = gs.model_copy()
         temp_gs.topic = actual_topic
 
-        # Передаем логгер
         instr = await director_engine.get_hidden_instruction(current_player, players, temp_gs, logger=lobby.logger)
         speech = await bot_engine.make_turn(current_player, players, temp_gs, instr, logger=lobby.logger)
 
         gs.history.append(f"[{current_player.name}]: {speech}")
         if lobby.logger: lobby.logger.log_chat_message(current_player.name, speech)
 
+        # 2. Заменяем на речь
         display_name = GameSetup.get_display_name(current_player, gs.round)
-        await broadcast(lobby, f"🤖 <b>{display_name}</b>:\n{speech}", bot)
+        await broadcast_speech(lobby, f"🤖 <b>{display_name}</b>:\n{speech}", bot)
 
         lobby.current_turn_index += 1
         await asyncio.sleep(2)
@@ -131,10 +190,12 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
     if lobby.game_state.phase not in ["presentation", "discussion", "runoff"]: return
     if lobby.current_turn_index >= len(lobby.game_players): return
     current_player = lobby.game_players[lobby.current_turn_index]
+
     if not current_player.is_alive:
         lobby.current_turn_index += 1
         await process_multi_turn(lobby, bot)
         return
+
     if current_player.name != user_name: return
 
     lobby.game_state.history.append(f"[{current_player.name}]: {text}")
@@ -149,10 +210,16 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
         if p["name"] == user_name:
             author_user_id = p["user_id"]
             break
-    await broadcast(lobby, f"👤 <b>{current_player.name}</b>:\n{text}", bot, exclude_id=author_user_id)
+
+    # Заменяем "Ходит..." на речь человека у других
+    display_name = GameSetup.get_display_name(current_player, lobby.game_state.round)
+    await broadcast_speech(lobby, f"👤 <b>{display_name}</b>:\n{text}", bot, exclude_id=author_user_id)
+
     lobby.current_turn_index += 1
     await process_multi_turn(lobby, bot)
 
+
+# --- ГОЛОСОВАНИЕ ---
 
 async def start_multi_voting(lobby: Lobby, bot: Bot):
     lobby.votes.clear()
@@ -188,7 +255,8 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
         kb = InlineKeyboardBuilder()
         for target in valid_targets:
             if target.name == p["name"] and not cfg.gameplay["voting"]["allow_self_vote"]: continue
-            kb.add(InlineKeyboardButton(text=f"☠ {target.name}", callback_data=f"mvote_{target.name}"))
+            btn_text = f"☠ {target.name} [{target.profession}]"
+            kb.add(InlineKeyboardButton(text=btn_text, callback_data=f"mvote_{target.name}"))
         kb.adjust(1)
         msg_text = f"🛑 <b>{title}</b>\nВыберите, кто покинет бункер."
         try:
@@ -249,10 +317,12 @@ async def finish_voting(lobby: Lobby, bot: Bot):
         if p.name == leader_name:
             p.is_alive = False
             break
+
     leader_user = next((p for p in lobby.players if p["name"] == leader_name), None)
     if leader_user:
         try:
             msg = "💀 <b>GAME OVER</b>. Вас изгнали."
+            if leader_user["user_id"] < 0: msg = f"<b>[DEBUG {leader_name}]</b> {msg}"
             await bot.send_message(leader_user["chat_id"], msg, parse_mode="HTML")
             lobby.remove_player(leader_user["user_id"])
         except:

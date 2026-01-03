@@ -10,9 +10,9 @@ class BotEngine:
                         bot_profile: PlayerProfile,
                         all_players: List[PlayerProfile],
                         game_state: GameState,
-                        director_instruction: str = "") -> str:
+                        director_instruction: str = "",
+                        logger=None) -> str:
 
-        # 1. Туман войны
         public_info = self._get_visible_profiles(all_players, game_state.round)
         public_info_str = "\n".join([str(p) for p in public_info])
 
@@ -22,7 +22,6 @@ class BotEngine:
         mem_depth = bot_settings.get("memory_depth", 10)
         history_text = "\n".join(game_state.history[-mem_depth:]) if game_state.history else "Начало."
 
-        # 2. Поиск последней фразы
         my_last_speech = "Пока не говорил."
         for line in reversed(game_state.history):
             if line.startswith(f"[{bot_profile.name}]"):
@@ -30,7 +29,6 @@ class BotEngine:
                 if len(parts) > 1: my_last_speech = parts[1]
                 break
 
-        # 3. Анализ угроз
         target_instruction = ""
         if game_state.phase in ["discussion", "runoff"]:
             best_target = None
@@ -40,7 +38,6 @@ class BotEngine:
             for target in all_players:
                 if target.name == bot_profile.name: continue
                 current_score, current_reasons = self._calculate_threat(bot_profile, target)
-
                 if current_score > max_threat:
                     max_threat = current_score
                     best_target = target
@@ -50,12 +47,11 @@ class BotEngine:
                 reasons_text = ", ".join(best_reasons) if best_reasons else "интуиция"
                 target_instruction = (
                     f"\n>>> ВНУТРЕННИЙ АНАЛИЗ УГРОЗ <<<\n"
-                    f"Твои инстинкты подсказывают, что {best_target.name} — главная угроза (Уровень: {int(max_threat)}).\n"
+                    f"Твои инстинкты подсказывают, что {best_target.name} — главная угроза.\n"
                     f"Причины: {reasons_text}.\n"
                     f"В своей речи ты должен упомянуть {best_target.name} и эти причины."
                 )
 
-        # 4. Промпт
         phase_instructions = cfg.gameplay["phases"]
         current_phase_task = phase_instructions.get(game_state.phase, {}).get("instruction", "Говори.")
         director_part = f"\n!!! СКРЫТЫЙ ПРИКАЗ РЕЖИССЕРА: {director_instruction} !!!\n" if director_instruction else ""
@@ -72,36 +68,30 @@ class BotEngine:
             my_last_speech=my_last_speech,
             memory=history_text,
             target_instruction=target_instruction,
+            attack_threshold=thresholds["attack"],
             min_words=word_limits["min"],
             max_words=word_limits["max"]
         )
         full_prompt += f"\n\nЗАДАЧА ТЕКУЩЕЙ ФАЗЫ ({game_state.phase}): {current_phase_task}"
         full_prompt += director_part
 
-        # 5. Генерация
         response = await llm.generate(
             bot_profile.llm_config,
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": f"Тема: {game_state.topic}. Действуй."}
             ],
-            json_mode=True
+            json_mode=True,
+            logger=logger
         )
 
         decision = llm.parse_json(response)
-        speech = decision.get("speech", "...")
-
-        # Fallback на случай пустоты
-        if not speech or speech.strip() == "..." or speech.strip() == "":
-            speech = "Мне нужно немного подумать..."
-
-        return speech
+        return decision.get("speech", "...")
 
     async def make_vote(self, bot_profile: PlayerProfile, candidates: List[PlayerProfile],
-                        game_state: GameState) -> str:
+                        game_state: GameState, logger=None) -> str:
 
         valid_targets = [p for p in candidates if p.name != bot_profile.name]
-        valid_names = [p.name for p in valid_targets]
 
         threat_assessment = ""
         scored_targets = []
@@ -124,51 +114,34 @@ class BotEngine:
                 break
 
         template = cfg.prompts["bot_player"]["voting_user"]
-
-        # Передаем список кандидатов в промпт
-        candidates_str = ", ".join(valid_names)
-
         prompt = template.format(
             name=bot_profile.name,
             profession=bot_profile.profession,
             personality=bot_profile.personality.description,
             threat_assessment=threat_assessment,
             history=history_text,
-            my_last_speech=my_last_speech,
-            candidates_list=candidates_str
+            my_last_speech=my_last_speech
         )
 
         response = await llm.generate(
             bot_profile.llm_config,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            json_mode=True
+            json_mode=True,
+            logger=logger
         )
 
         data = llm.parse_json(response)
-        vote_raw = data.get("vote", "")
+        vote = data.get("vote")
 
-        # --- НОРМАЛИЗАЦИЯ ГОЛОСА ---
-        final_vote = None
-
-        # 1. Точное совпадение
-        if vote_raw in valid_names:
-            final_vote = vote_raw
-        else:
-            # 2. Нечеткий поиск (без регистра)
-            for name in valid_names:
-                if vote_raw and (name.lower() in vote_raw.lower() or vote_raw.lower() in name.lower()):
-                    final_vote = name
-                    break
-
-        # 3. Fallback (если имя не найдено или пустое - берем самую большую угрозу)
-        if not final_vote:
+        target_names = [p.name for p in valid_targets]
+        if vote not in target_names:
             if scored_targets:
-                final_vote = scored_targets[0][0].name
+                vote = scored_targets[0][0].name
             else:
-                final_vote = random.choice(valid_names)
+                vote = random.choice(target_names) if target_names else ""
 
-        return final_vote
+        return vote
 
     def _calculate_threat(self, me: PlayerProfile, target: PlayerProfile):
         score = 0
@@ -177,17 +150,14 @@ class BotEngine:
 
         for factor, weight in target.active_factors.items():
             if weight <= 0: continue
-
             mult = my_mults.get(factor, 1.0)
             final_weight = weight * mult
             score += final_weight
-
             intensity = "Low"
             if final_weight > 50:
                 intensity = "HIGH"
             elif final_weight > 20:
                 intensity = "Medium"
-
             reasons.append(f"{factor.upper()}={intensity}")
 
         return score, reasons
@@ -204,9 +174,7 @@ class BotEngine:
                 pub.trait = "???"
             if visibility_rules.get("show_status", False):
                 pub.status = p.status
-
             active_tags = [k.upper() for k, v in p.active_factors.items() if v > 20]
             pub.known_factors = active_tags
-
             visible_list.append(pub)
         return visible_list

@@ -28,7 +28,7 @@ from src.schemas import GameState, PlayerProfile
 from src.services.bot import BotEngine
 from src.services.judge import JudgeService
 from src.services.director import DirectorEngine
-from src.logger_service import GameLogger  # <-- Новый класс
+from src.logger_service import GameLogger  # <-- CLASS IMPORT
 from src.s3_service import s3_uploader
 from src.lobbies import lobby_manager, Lobby
 from src.multi_engine import process_multi_turn, handle_human_message, broadcast, handle_vote
@@ -245,8 +245,8 @@ async def process_turn(chat_id: int, state: FSMContext):
         return
     else:
         await bot.send_chat_action(chat_id, "typing")
-        instr = await director_engine.get_hidden_instruction(current_player, players, gs)
-        speech = await bot_engine.make_turn(current_player, players, gs, instr)
+        instr = await director_engine.get_hidden_instruction(current_player, players, gs, logger=logger)
+        speech = await bot_engine.make_turn(current_player, players, gs, director_instruction=instr, logger=logger)
 
         if logger: logger.log_chat_message(current_player.name, speech)
 
@@ -332,9 +332,12 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
         valid_targets = players
 
     votes = [target_name]
+
+    logger = solo_sessions.get(chat_id)
+
     for bot_p in players:
         if not bot_p.is_human:
-            vote = await bot_engine.make_vote(bot_p, valid_targets, gs)
+            vote = await bot_engine.make_vote(bot_p, valid_targets, gs, logger=logger)
             votes.append(vote)
 
     counts = Counter(votes)
@@ -551,6 +554,7 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
 
     intro = f"🎬 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
     for p in lobby.game_players:
+        # Показываем профессию ВСЕМ
         intro += f"- {p.name}: {p.profession}\n"
 
     await broadcast(lobby, intro, bot)

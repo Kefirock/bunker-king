@@ -13,32 +13,23 @@ class DirectorEngine:
     async def get_hidden_instruction(self,
                                      current_player: PlayerProfile,
                                      all_players: List[PlayerProfile],
-                                     game_state: GameState) -> str:
-        """
-        Генерирует скрытую инструкцию.
-        Теперь анализирует состояние ВСЕХ игроков, чтобы наказать подозрительных.
-        """
-        # 1. Поиск "Козла отпущения" (игрока с высоким подозрением)
+                                     game_state: GameState,
+                                     logger=None) -> str:
+
         suspicious_target = None
         max_score = 0
 
         for p in all_players:
-            if p.name == current_player.name: continue  # Не нападать на себя
-
-            # Если игрок подозрителен (score > 15 или статус плохой)
+            if p.name == current_player.name: continue
             if p.suspicion_score > 15 or p.status in ["SUSPICIOUS", "LIAR", "IMPOSTOR"]:
                 if p.suspicion_score > max_score:
                     max_score = p.suspicion_score
                     suspicious_target = p
 
-        # 2. Логика вмешательства
         should_inject = False
-
-        # Если есть явная цель для атаки, Директор вмешивается почти всегда
         if suspicious_target:
             should_inject = True
         else:
-            # Иначе рандом
             chance = self.inject_chance * (self.chaos_level / 5.0)
             if game_state.phase == "discussion": chance += 0.2
             if random.random() < chance:
@@ -47,11 +38,9 @@ class DirectorEngine:
         if not should_inject:
             return ""
 
-            # 3. Генерация промпта
         model = cfg.models["director_models"][0]
         history_snippet = "\n".join(game_state.history[-5:])
 
-        # Формируем контекст цели
         target_context = ""
         if suspicious_target:
             target_context = (
@@ -78,7 +67,8 @@ class DirectorEngine:
         instruction = await llm.generate(
             model,
             [{"role": "user", "content": prompt}],
-            temperature=0.8
+            temperature=0.8,
+            logger=logger
         )
 
         return instruction.strip()

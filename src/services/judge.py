@@ -7,10 +7,9 @@ class JudgeService:
                            player: PlayerProfile,
                            text: str,
                            topic: str,
-                           logger=None) -> dict: # <-- logger передается явно
+                           logger=None) -> dict:
 
         prompt_template = cfg.prompts["judge"]["system"]
-
         system_prompt = prompt_template.format(
             name=player.name,
             profession=player.profession,
@@ -25,11 +24,11 @@ class JudgeService:
             judge_model,
             [{"role": "system", "content": system_prompt}],
             temperature=0.1,
-            json_mode=True
+            json_mode=True,
+            logger=logger
         )
 
         data = llm.parse_json(response)
-
         violation_type = data.get("violation_type", "none")
         argument_quality = data.get("argument_quality", "weak")
 
@@ -50,7 +49,6 @@ class JudgeService:
             for key in player.active_factors:
                 player.active_factors[key] = int(player.active_factors[key] * multiplier)
             score_change -= 10
-
         elif argument_quality == "bad":
             multiplier = mitigation["bad_argument"]
             for key in player.active_factors:
@@ -59,7 +57,6 @@ class JudgeService:
 
         total_suspicion = sum(player.active_factors.values())
 
-        # Если логгер передан, пишем в него
         if logger:
             logger.log_llm_interaction(
                 service_name="JudgeService",

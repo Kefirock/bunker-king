@@ -16,20 +16,16 @@ class GameLogger:
     def __init__(self, mode: str, username: str):
         """
         mode: "Solo" или "Multiplayer"
-        username: Имя игрока (соло) или лидера лобби (мульти)
+        username: Имя игрока или лидера
         """
         self.base_log_dir = "Logs"
 
-        # 1. Очистка имени от спецсимволов
         safe_name = re.sub(r'[\\/*?:"<>| ]', "_", username).strip() or "Unknown"
-
-        # 2. Формирование пути: Logs / Mode / Username / Timestamp
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_dir = os.path.join(self.base_log_dir, mode, safe_name, timestamp)
 
         os.makedirs(self.session_dir, exist_ok=True)
 
-        # 3. Создаем отдельные логгеры для этой сессии
         self.chat_logger = self._create_file_logger(f"chat_{timestamp}_{id(self)}", "chat_history.log")
         self.logic_logger = self._create_file_logger(f"logic_{timestamp}_{id(self)}", "game_logic.log")
         self.raw_logger = self._create_file_logger(f"raw_{timestamp}_{id(self)}", "raw_debug.log")
@@ -44,15 +40,14 @@ class GameLogger:
         }
 
         start_msg = f"=== NEW {mode.upper()} SESSION: {username} | {timestamp} ==="
-        logging.info(start_msg)  # В общую консоль
-        if self.logic_logger: self.logic_logger.info(start_msg)  # В файл
+        logging.info(start_msg)
+        if self.logic_logger: self.logic_logger.info(start_msg)
 
     def _create_file_logger(self, name: str, filename: str):
-        """Создает логгер, пишущий только в конкретный файл сессии"""
         filepath = os.path.join(self.session_dir, filename)
         logger = logging.getLogger(name)
         logger.setLevel(logging.INFO)
-        logger.propagate = False  # Не дублировать в root
+        logger.propagate = False
 
         if logger.hasHandlers():
             logger.handlers.clear()
@@ -63,12 +58,13 @@ class GameLogger:
         return logger
 
     def log_chat_message(self, speaker: str, message: str) -> None:
+        """Пишет чат ТОЛЬКО в файл, в консоль НЕ выводит."""
         msg = f"[{speaker}]: {message}"
         if self.chat_logger: self.chat_logger.info(msg)
-        # В консоль дублируем кратко
-        logging.info(f"💬 {msg}")
+        # logging.info удален отсюда
 
     def log_game_event(self, event_type: str, message: str, details: dict = None) -> None:
+        """События движка дублируются в консоль (кратко)"""
         icon = self.icons.get(event_type.upper(), self.icons["INFO"])
         log_msg = f"{icon} [{event_type}] {message}"
 
@@ -94,11 +90,9 @@ class GameLogger:
             self.raw_logger.info(json.dumps(entry, ensure_ascii=False, indent=2))
 
     def get_session_path(self) -> str:
-        """Возвращает путь к папке для S3 uploader"""
         return self.session_dir
 
 
-# Настройка общей консоли (запускается при импорте)
 def setup_console():
     root = logging.getLogger()
     root.setLevel(logging.INFO)

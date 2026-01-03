@@ -1,18 +1,12 @@
 import random
-from typing import List
+from typing import List, Union, Dict
 from src.config import cfg
 from src.schemas import PlayerProfile, Persona, GameState
 
 
 class GameSetup:
-    # src/utils.py
     @staticmethod
-    def generate_players(user_data: list | str) -> List[PlayerProfile]:
-        """
-        user_data:
-          - Если str: Имя одного игрока (Соло режим)
-          - Если list: Список словарей [{'name': 'Max', 'id': 123}, ...] (Мультиплеер)
-        """
+    def generate_players(user_data: Union[str, List[Dict]]) -> List[PlayerProfile]:
         scenarios = cfg.scenarios
         profs = scenarios["professions"][:]
         traits = scenarios["traits"][:]
@@ -26,20 +20,16 @@ class GameSetup:
 
         players = []
 
-        # 1. Определяем список людей
         humans_to_create = []
         if isinstance(user_data, str):
             humans_to_create.append({"name": user_data})
         elif isinstance(user_data, list):
             humans_to_create = user_data
 
-        # 2. Сколько нужно ботов?
-        # Читаем конфиг setup.total_players (по умолчанию 5)
         target_total = cfg.gameplay.get("setup", {}).get("total_players", 5)
         human_count = len(humans_to_create)
         bots_needed = max(0, target_total - human_count)
 
-        # 3. Создаем БОТОВ
         for i in range(bots_needed):
             bot_name = names.pop() if names else f"Bot-{i + 1}"
             bot_prof = profs.pop() if profs else "Выживший"
@@ -62,21 +52,21 @@ class GameSetup:
                 llm_config=random.choice(bot_models)
             ))
 
-        # 4. Создаем ЛЮДЕЙ
         human_persona = Persona(id="human", description="Игрок", style_example="", multipliers={})
 
         for h in humans_to_create:
             p_name = h["name"]
-            # Если это соло, добавляем (Вы), если мульти - оставляем ник
             display_name = f"{p_name} (Вы)" if isinstance(user_data, str) else p_name
+
+            hum_prof = profs.pop() if profs else "Счастливчик"
+            hum_trait = traits.pop() if traits else "Живой"
 
             players.append(PlayerProfile(
                 name=display_name,
-                profession=profs.pop() if profs else "Выживший",
-                trait=traits.pop() if traits else "Счастливчик",
+                profession=hum_prof,
+                trait=hum_trait,
                 personality=human_persona,
                 is_human=True,
-                # Важно: для мультиплеера можно сохранить ID юзера в поле (хак через personality или отдельное поле, но пока так)
             ))
 
         random.shuffle(players)
@@ -96,18 +86,20 @@ class GameSetup:
         )
 
     @staticmethod
-    def get_display_name(player: PlayerProfile, round_num: int) -> str:
+    def get_display_name(p: PlayerProfile, round_num: int) -> str:
         """
-        Форматирует имя для отображения В ТЕЛЕГРАМЕ (UI).
-        Раунд 1: Имя [Профессия]
-        Раунд 2+: Имя [Профессия, Черта]
+        Формат: Имя: Профессия [, Черта]
+        Статус и факторы скрыты от игроков.
         """
-        # Если игрок человек - не добавляем лишнего, он знает о себе
-        if player.is_human:
-            # Можно добавить (Вы), но оно обычно уже есть в player.name
-            return f"<b>{player.name}</b> [{player.profession}, {player.trait}]"
+        visibility_rules = cfg.get_visibility(round_num)
 
-        if round_num == 1:
-            return f"<b>{player.name}</b> [{player.profession}]"
+        # Профессия видна всегда (если только не добавить в конфиг явный запрет)
+        prof = p.profession if p.profession else "???"
+
+        # Черта - зависит от раунда
+        if visibility_rules.get("show_trait", False):
+            trait = f", {p.trait}"
         else:
-            return f"<b>{player.name}</b> [{player.profession}, {player.trait}]"
+            trait = ""
+
+        return f"{p.name}: {prof}{trait}"

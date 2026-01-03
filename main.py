@@ -31,9 +31,9 @@ from src.services.director import DirectorEngine
 from src.logger_service import game_logger
 from src.s3_service import s3_uploader
 
-# --- НОВЫЕ ИМПОРТЫ ДЛЯ МУЛЬТИПЛЕЕРА ---
+# --- НОВЫЕ ИМПОРТЫ ДЛЯ МУЛЬТИПЛЕЕРА И DEBUG ---
 from src.lobbies import lobby_manager, Lobby
-from src.multi_engine import process_multi_turn, handle_human_message, broadcast
+from src.multi_engine import process_multi_turn, handle_human_message, broadcast, handle_vote
 
 load_dotenv(os.path.join("Configs", ".env"))
 
@@ -165,7 +165,7 @@ async def cmd_start(message: Message, state: FSMContext):
     kb.add(InlineKeyboardButton(text="👤 SOLO GAME", callback_data="mode_solo"))
     kb.add(InlineKeyboardButton(text="👥 MULTIPLAYER", callback_data="mode_multi"))
     await message.answer("<b>BUNKER 3.0</b>\nВыберите режим:", reply_markup=kb.as_markup(), parse_mode="HTML")
-    # Сбрасываем стейт, чтобы не висеть в старых
+    # Сбрасываем стейт
     await state.clear()
 
 
@@ -211,10 +211,10 @@ async def cmd_get_logs(message: Message):
 
 @router.callback_query(F.data == "mode_solo")
 async def solo_mode_entry(callback: CallbackQuery, state: FSMContext):
-    """Вход в Соло режим (как было раньше)"""
+    """Вход в Соло режим"""
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
-    await callback.message.edit_text("<b>👤 SOLO MODE</b>\nВы будете играть с 4 ботами.", reply_markup=kb.as_markup(),
+    await callback.message.edit_text("<b>👤 SOLO MODE</b>\nВы будете играть с ботами.", reply_markup=kb.as_markup(),
                                      parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
 
@@ -516,8 +516,6 @@ async def create_lobby_handler(callback: CallbackQuery, state: FSMContext):
     user = callback.from_user
     # Создаем лобби
     lobby = lobby_manager.create_lobby(user.id, user.first_name)
-    # Сразу добавляем создателя (хотя init это тоже делает, для надежности)
-    # lobby.add_player(user.id, callback.message.chat.id, user.first_name)
 
     await update_lobby_message(callback.message, lobby)
     await state.set_state(GameFSM.MultiLobby)
@@ -570,11 +568,10 @@ async def update_lobby_message(message: Message, lobby: Lobby):
     kb = InlineKeyboardBuilder()
 
     # Кнопку старт видит только хост
-    # В Telegram Private chat.id == user.id
     if message.chat.id == lobby.host_id:
         kb.add(InlineKeyboardButton(text="🚀 START GAME", callback_data=f"start_multi_{lobby.lobby_id}"))
 
-    kb.add(InlineKeyboardButton(text="🔙 Выйти", callback_data="leave_lobby"))  # TODO: Реализовать выход
+    kb.add(InlineKeyboardButton(text="🔙 Выйти", callback_data="leave_lobby"))
 
     await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
@@ -592,13 +589,10 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
     # Генерация игроков (Люди + Боты)
     humans_data = [{"name": p["name"], "id": p["user_id"]} for p in lobby.players]
 
-    # Вызываем обновленный generate_players из utils
     game_players = GameSetup.generate_players(humans_data)
     lobby.game_players = game_players
 
-    # Инит стейта
     lobby.game_state = GameSetup.init_game_state()
-    # Берем топик используя функцию из main (она у нас есть)
     lobby.game_state.topic = get_topic_for_round_base(1)
 
     # Рассылка интро
@@ -608,27 +602,111 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
         intro += f"- {p.name}: {role}\n"
 
     await broadcast(lobby, intro, bot)
-
-    # Переводим всех участников в состояние игры
-    # (Технически FSM есть только у бота, но мы можем попытаться поменять стейт,
-    # если бы у нас был доступ к storage для каждого юзера.
-    # В aiogram 3 без user_id это сложно. Поэтому мы просто используем глобальный роутер MultiGame
-    # и проверяем lobby_manager при каждом сообщении)
-
     await asyncio.sleep(2)
     # Старт цикла
     await process_multi_turn(lobby, bot)
 
 
-@router.message(GameFSM.MultiGame)
-async def multi_chat_handler(message: Message, state: FSMContext):
-    """Обработка сообщений от людей в мультиплеере"""
-    # Этот хендлер пока не сработает автоматически, т.к. мы не сеттили стейт каждому юзеру.
-    # Но мы добавим его в общий роутер без фильтра стейта, но с проверкой лобби.
-    pass
+# ==========================================
+#              DEBUG COMMANDS (GOD MODE)
+# ==========================================
+
+@router.message(Command("fake_join"))
+async def cmd_fake_join(message: Message):
+    """Добавляет фейкового игрока в лобби админа"""
+    lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
+    if not lobby or lobby.status != "waiting":
+        await message.answer("❌ Вы не в лобби или игра уже идет.")
+        return
+
+    # Генерируем фейка
+    fake_id = -random.randint(1000, 99999)
+    fake_name = f"Fake_{random.choice(['Bob', 'Alice', 'John', 'Mike', 'Kate'])}"
+
+    # chat_id ставим ТВОЙ
+    lobby.add_player(fake_id, message.chat.id, fake_name)
+
+    await message.answer(f"✅ Добавлен бот-человек: {fake_name} (ID: {fake_id})")
+    await update_lobby_message(message, lobby)
 
 
-# Хендлер для текстовых сообщений (Global Catch для мультиплеера)
+@router.message(Command("fake_say"))
+async def cmd_fake_say(message: Message):
+    """Сказать за фейка: /fake_say Привет всем"""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("⚠️ Использование: /fake_say Текст сообщения")
+        return
+
+    text = args[1]
+    lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
+    if not lobby or lobby.status != "playing": return
+
+    # Проверяем, чей сейчас ход
+    if lobby.current_turn_index >= len(lobby.game_players): return
+    current_player = lobby.game_players[lobby.current_turn_index]
+
+    # Находим, является ли текущий игрок фейком в этом лобби
+    player_data = next((p for p in lobby.players if p["name"] == current_player.name), None)
+
+    if player_data and player_data["user_id"] < 0:
+        await handle_human_message(lobby, bot, text, current_player.name)
+        try:
+            await message.delete()
+        except:
+            pass
+    else:
+        await message.answer(f"❌ Сейчас ходит {current_player.name}, и это не ваш фейк.")
+
+
+@router.message(Command("vote_as"))
+async def cmd_vote_as(message: Message):
+    """Голос за фейка: /vote_as Fake_Bob Fake_Alice"""
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("⚠️ /vote_as <Кто> <За_кого>")
+        return
+
+    voter_name = args[1]
+    target_name = args[2]
+
+    lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
+    if not lobby or lobby.status != "playing": return
+
+    # Импорт внутри функции во избежание круговых зависимостей
+    from src.multi_engine import handle_vote
+    await handle_vote(lobby, bot, voter_name, target_name)
+    await message.answer(f"✅ {voter_name} проголосовал за {target_name}")
+
+
+# --- ОБРАБОТКА ГОЛОСОВАНИЯ РЕАЛЬНЫХ ЛЮДЕЙ В МУЛЬТИПЛЕЕРЕ ---
+@router.callback_query(F.data.startswith("mvote_"))
+async def multi_vote_handler(callback: CallbackQuery):
+    target_name = callback.data.split("_")[1]
+    user = callback.from_user
+    lobby = lobby_manager.find_lobby_by_user(user.id)
+
+    if not lobby or not lobby.game_state or lobby.game_state.phase != "voting":
+        await callback.answer("Сейчас не время голосовать.", show_alert=True)
+        return
+
+    # Определяем имя голосующего игрока по ID
+    lobby_p = next((p for p in lobby.players if p["user_id"] == user.id), None)
+
+    if lobby_p:
+        # Проверка жив ли игрок
+        game_p = next((p for p in lobby.game_players if p.name == lobby_p["name"]), None)
+        if not game_p or not game_p.is_alive:
+            await callback.answer("Мертвые не голосуют.", show_alert=True)
+            return
+
+        from src.multi_engine import handle_vote
+        await handle_vote(lobby, bot, lobby_p["name"], target_name)
+        await callback.answer(f"Вы голосуете за {target_name}")
+        await callback.message.edit_text(f"✅ Ваш голос принят: <b>{target_name}</b>", parse_mode="HTML")
+
+
+# --- GLOBAL HANDLER FOR MULTIPLAYER ---
 @router.message()
 async def global_message_handler(message: Message):
     user = message.from_user

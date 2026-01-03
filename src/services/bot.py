@@ -37,6 +37,9 @@ class BotEngine:
 
             for target in all_players:
                 if target.name == bot_profile.name: continue
+                # ВАЖНО: Игнорируем мертвых
+                if not target.is_alive: continue
+
                 current_score, current_reasons = self._calculate_threat(bot_profile, target)
                 if current_score > max_threat:
                     max_threat = current_score
@@ -91,7 +94,8 @@ class BotEngine:
     async def make_vote(self, bot_profile: PlayerProfile, candidates: List[PlayerProfile],
                         game_state: GameState, logger=None) -> str:
 
-        valid_targets = [p for p in candidates if p.name != bot_profile.name]
+        # Фильтруем мертвых и себя (хотя candidates обычно уже отфильтрован, но на всякий случай)
+        valid_targets = [p for p in candidates if p.name != bot_profile.name and p.is_alive]
 
         threat_assessment = ""
         scored_targets = []
@@ -113,12 +117,10 @@ class BotEngine:
                 if len(parts) > 1: my_last_speech = parts[1]
                 break
 
-        # Генерируем список имен для промпта
         candidates_str = ", ".join([p.name for p in valid_targets])
 
         template = cfg.prompts["bot_player"]["voting_user"]
 
-        # Передаем candidates_list
         prompt = template.format(
             name=bot_profile.name,
             profession=bot_profile.profession,
@@ -172,6 +174,9 @@ class BotEngine:
         visibility_rules = cfg.get_visibility(round_num)
         visible_list = []
         for p in players:
+            # ВАЖНО: Игнорируем мертвых
+            if not p.is_alive: continue
+
             pub = PublicPlayerInfo(name=p.name)
             pub.profession = p.profession
             if visibility_rules.get("show_trait", False):

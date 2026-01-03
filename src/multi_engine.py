@@ -192,10 +192,7 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
     for p in lobby.players:
         if p["name"] == user_name:
             author_user_id = p["user_id"]
-            try:
-                await bot.send_message(p["chat_id"], "✅ Принято.", reply_markup=ReplyKeyboardRemove())
-            except:
-                pass
+            # "Принято" УБРАНО
             break
 
     display_name = GameSetup.get_display_name(current_player, lobby.game_state.round)

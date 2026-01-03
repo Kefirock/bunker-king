@@ -288,7 +288,6 @@ async def process_turn(chat_id: int, state: FSMContext):
     actual_topic = get_display_topic(gs, current_player.trait, cat_data)
 
     if current_player.is_human:
-        # Убрана ReplyKeyboard
         await bot.send_message(chat_id, f"👉 <b>ВАШ ХОД!</b>\nТема: {actual_topic}", parse_mode="HTML")
 
         await state.update_data(game_state=gs.model_dump())
@@ -352,13 +351,7 @@ async def human_turn_handler(message: Message, state: FSMContext):
 
     gs.history.append(f"[{player.name}]: {text_to_process}")
 
-    # Сообщение о принятии, удаляется
-    wait_msg = await message.answer("✅ Ответ принят.")
-    await asyncio.sleep(0.5)
-    try:
-        await wait_msg.delete()
-    except:
-        pass
+    # "Принято" УБРАНО
 
     data["players"] = [p.model_dump() for p in players]
     data["game_state"] = gs.model_dump()
@@ -390,7 +383,9 @@ async def start_voting(chat_id: int, state: FSMContext):
 
 @router.callback_query(GameFSM.Voting, F.data.startswith("vote_"))
 async def voting_handler(callback: CallbackQuery, state: FSMContext):
-    target_name = callback.data.split("_")[1]
+    # ВАЖНО: Разделитель с limit=1 для имен с подчеркиваниями
+    target_name = callback.data.split("_", 1)[1]
+
     data = await state.get_data()
     players = [PlayerProfile(**p) for p in data["players"]]
     gs = GameState(**data["game_state"])
@@ -504,6 +499,7 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
 
 
 # ================= MULTIPLAYER HANDLERS =================
+# ... (Остальной код мультиплеера идентичен предыдущему, но нужно обновить вызовы в multi_engine)
 @router.callback_query(F.data == "mode_multi")
 async def multi_mode_entry(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
@@ -633,7 +629,6 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
     lobby.game_state.topic = get_topic_for_round_base(1)
 
     for p in lobby.players:
-        # Dashboard pin
         dash_text = GameSetup.generate_dashboard(lobby.game_state, lobby.game_players)
         try:
             msg = await bot.send_message(p["chat_id"], dash_text, parse_mode="HTML")
@@ -641,7 +636,6 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
         except:
             pass
 
-        # Dossier separate
         me_game = next((gp for gp in lobby.game_players if gp.name == p["name"]), None)
         if me_game:
             dossier_text = GameSetup.generate_dossier(me_game)
@@ -697,7 +691,6 @@ async def cmd_vote_as(message: Message):
     lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
     if not lobby or lobby.status != "playing": return
 
-    # Строгая проверка имени цели
     alive_names = [p.name for p in lobby.game_players if p.is_alive]
     if target_name not in alive_names:
         valid_str = ", ".join(alive_names)
@@ -714,7 +707,8 @@ async def cmd_vote_as(message: Message):
 
 @router.callback_query(F.data.startswith("mvote_"))
 async def multi_vote_handler(callback: CallbackQuery):
-    target_name = callback.data.split("_")[1]
+    # ВАЖНО: Разделитель с limit=1
+    target_name = callback.data.split("_", 1)[1]
     user = callback.from_user
     lobby = lobby_manager.find_lobby_by_user(user.id)
     if not lobby or not lobby.game_state or lobby.game_state.phase != "voting": return

@@ -1,17 +1,20 @@
-# src/multi_engine.py
 import asyncio
 from aiogram import Bot
 from src.config import cfg
-from src.lobbies import Lobby, lobby_manager
+from src.lobbies import Lobby
 from src.services.bot import BotEngine
 from src.services.director import DirectorEngine
 from src.services.judge import JudgeService
 from src.schemas import PlayerProfile, GameState
-from src.logger_service import game_logger
+from src.utils import GameSetup
+
+# Инициализация сервисов
+bot_engine = BotEngine()
+judge_service = JudgeService()
+director_engine = DirectorEngine()
 
 
-# Импортируем хелперы из main (чтобы не дублировать логику топиков)
-# В идеале их надо вынести в utils, но пока просто скопируем логику
+# Хелперы топиков
 def get_topic_base(round_num, trait="", cat_data=None):
     topics_cfg = cfg.gameplay["rounds"]["topics"]
     if round_num == 1:
@@ -33,12 +36,6 @@ def get_display_topic(gs: GameState, p: PlayerProfile, cat_data: dict) -> str:
     return "..."
 
 
-# Инициализация сервисов
-bot_engine = BotEngine()
-judge_service = JudgeService()
-director_engine = DirectorEngine()
-
-
 async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None):
     """Рассылает сообщение всем игрокам лобби"""
     for p in lobby.players:
@@ -47,7 +44,7 @@ async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None):
         try:
             await bot.send_message(p["chat_id"], text, parse_mode="HTML")
         except:
-            pass  # Игрок заблочил бота
+            pass
 
 
 async def process_multi_turn(lobby: Lobby, bot: Bot):
@@ -60,7 +57,6 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
     cat_data = lobby.catastrophe_data
 
     # 1. Проверка конца фазы
-    # (Упростим: пока поддерживаем только Presentation и Discussion, без Runoff для краткости)
     if idx >= len(players):
         if gs.phase == "presentation":
             gs.phase = "discussion"
@@ -70,8 +66,7 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
             await process_multi_turn(lobby, bot)
             return
         elif gs.phase == "discussion":
-            # Тут должно быть голосование, пока просто финиш раунда
-            await broadcast(lobby, "🏁 <b>РАУНД ЗАВЕРШЕН (MVP Stop)</b>", bot)
+            await broadcast(lobby, "🏁 <b>РАУНД ЗАВЕРШЕН</b> (Голосование пока в разработке)", bot)
             return
 
     current_player = players[idx]
@@ -79,23 +74,18 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
 
     # 2. ХОД
     if current_player.is_human:
-        # Находим chat_id этого человека
+        # Находим chat_id этого человека по имени
         target_user = None
         for p in lobby.players:
-            # Ищем по имени (не самый надежный способ, но простой для MVP)
-            # Лучше хранить ID в PlayerProfile, но пока по имени
             if p["name"] == current_player.name:
                 target_user = p
                 break
 
         if target_user:
-            # Уведомляем всех
             await broadcast(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot, exclude_id=target_user["user_id"])
-            # Уведомляем игрока
             await bot.send_message(target_user["chat_id"],
                                    f"👤 <b>ТВОЙ ХОД!</b>\nТема: {actual_topic}\nНапиши сообщение в чат.",
                                    parse_mode="HTML")
-            # Мы выходим из цикла. Движок ждет сообщения от юзера в main.py
             return
     else:
         # Ход бота
@@ -107,9 +97,10 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
         speech = await bot_engine.make_turn(current_player, players, temp_gs, instr)
 
         gs.history.append(f"[{current_player.name}]: {speech}")
-        await broadcast(lobby, f"🤖 <b>{current_player.name}</b>:\n{speech}", bot)
 
-        # Следующий ход
+        display_name = GameSetup.get_display_name(current_player, gs.round)
+        await broadcast(lobby, f"🤖 <b>{display_name}</b>:\n{speech}", bot)
+
         lobby.current_turn_index += 1
         await asyncio.sleep(2)
         await process_multi_turn(lobby, bot)
@@ -118,11 +109,18 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
 async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str):
     """Обработка ответа человека"""
     gs = lobby.game_state
+
+    # --- FIX: ПРОВЕРКА НА ГРАНИЦЫ МАССИВА ---
+    # Если индекс вышел за пределы (например, фаза завершилась), игнорируем сообщение
+    if lobby.current_turn_index >= len(lobby.game_players):
+        return
+    # ----------------------------------------
+
     current_player = lobby.game_players[lobby.current_turn_index]
 
     # Проверка, что ходит именно он
     if current_player.name != user_name:
-        return  # Игнорим чужие сообщения
+        return
 
     gs.history.append(f"[{current_player.name}]: {text}")
 

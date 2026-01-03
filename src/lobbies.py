@@ -8,21 +8,26 @@ class Lobby:
     def __init__(self, lobby_id: str, host_id: int, host_name: str):
         self.lobby_id = lobby_id
         self.host_id = host_id
+        # players: список словарей {user_id, chat_id, name}
         self.players: List[Dict] = []
         self.status = "waiting"
 
-        # Состояние игры
+        # ID сообщения с меню лобби (чтобы обновлять его при /fake_join)
+        self.menu_message_id: Optional[int] = None
+
+        # Состояние игры (для движка)
         self.game_state: Optional[GameState] = None
-        self.game_players = []
+        self.game_players = []  # Список объектов PlayerProfile
         self.current_turn_index = 0
         self.catastrophe_data = {}
 
-        # --- НОВОЕ: Хранение голосов { "VoterName": "TargetName" } ---
+        # Хранение голосов { "VoterName": "TargetName" }
         self.votes: Dict[str, str] = {}
 
         self.add_player(host_id, host_id, host_name)
 
     def add_player(self, user_id: int, chat_id: int, name: str):
+        # Проверка на дубликаты
         for p in self.players:
             if p["user_id"] == user_id:
                 return
@@ -31,12 +36,16 @@ class Lobby:
     def remove_player(self, user_id: int):
         self.players = [p for p in self.players if p["user_id"] != user_id]
 
+    def get_player_names(self):
+        return [p["name"] for p in self.players]
+
 
 class LobbyManager:
     def __init__(self):
         self.lobbies: Dict[str, Lobby] = {}
 
     def create_lobby(self, host_id: int, host_name: str) -> Lobby:
+        # Генерируем короткий ID (4 символа)
         lid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
         lobby = Lobby(lid, host_id, host_name)
         self.lobbies[lid] = lobby

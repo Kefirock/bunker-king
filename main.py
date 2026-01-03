@@ -111,7 +111,6 @@ async def start_dummy_server():
 
 async def keep_alive_task(port):
     """Пингует локальный сервер каждые 5 минут."""
-    # Поддержка внешнего URL для обхода спящего режима Koyeb
     public_url = os.getenv("APP_PUBLIC_URL")
     if public_url:
         url = public_url
@@ -165,7 +164,6 @@ async def cmd_start(message: Message, state: FSMContext):
     kb.add(InlineKeyboardButton(text="👤 SOLO GAME", callback_data="mode_solo"))
     kb.add(InlineKeyboardButton(text="👥 MULTIPLAYER", callback_data="mode_multi"))
     await message.answer("<b>BUNKER 3.0</b>\nВыберите режим:", reply_markup=kb.as_markup(), parse_mode="HTML")
-    # Сбрасываем стейт
     await state.clear()
 
 
@@ -214,7 +212,7 @@ async def solo_mode_entry(callback: CallbackQuery, state: FSMContext):
     """Вход в Соло режим"""
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="☢️ НАЧАТЬ ИГРУ", callback_data="start_game"))
-    await callback.message.edit_text("<b>👤 SOLO MODE</b>\nВы будете играть с ботами.", reply_markup=kb.as_markup(),
+    await callback.message.edit_text("<b>👤 SOLO MODE</b>\nВы будете играть с 4 ботами.", reply_markup=kb.as_markup(),
                                      parse_mode="HTML")
     await state.set_state(GameFSM.Lobby)
 
@@ -241,7 +239,6 @@ async def start_game_handler(callback: CallbackQuery, state: FSMContext):
         current_turn_index=0
     )
 
-    # ФОРМИРУЕМ СПИСОК ИГРОКОВ (Формат Раунда 1)
     intro = f"🌍 <b>СЦЕНАРИЙ:</b> {current_catastrophe['name']}\n\n👥 <b>ИГРОКИ:</b>\n"
     for p in players:
         display_name = GameSetup.get_display_name(p, 1)
@@ -514,10 +511,12 @@ async def back_to_start(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "lobby_create")
 async def create_lobby_handler(callback: CallbackQuery, state: FSMContext):
     user = callback.from_user
-    # Создаем лобби
     lobby = lobby_manager.create_lobby(user.id, user.first_name)
 
-    await update_lobby_message(callback.message, lobby)
+    # Сохраняем ID сообщения, которое будем редактировать
+    lobby.menu_message_id = callback.message.message_id
+
+    await update_lobby_message(bot, lobby)
     await state.set_state(GameFSM.MultiLobby)
 
 
@@ -551,11 +550,19 @@ async def join_lobby_handler(callback: CallbackQuery, state: FSMContext):
     user = callback.from_user
     lobby.add_player(user.id, callback.message.chat.id, user.first_name)
 
-    await update_lobby_message(callback.message, lobby)
+    # Если зашел хост, обновляем указатель на сообщение меню
+    if user.id == lobby.host_id:
+        lobby.menu_message_id = callback.message.message_id
+
+    await update_lobby_message(bot, lobby)
     await state.set_state(GameFSM.MultiLobby)
 
 
-async def update_lobby_message(message: Message, lobby: Lobby):
+async def update_lobby_message(bot: Bot, lobby: Lobby):
+    """Обновляет сообщение лобби (безопасно)"""
+    if not lobby.menu_message_id:
+        return
+
     total_needed = cfg.gameplay.get("setup", {}).get("total_players", 5)
     players_list = "\n".join([f"- {p['name']}" for p in lobby.players])
 
@@ -566,14 +573,19 @@ async def update_lobby_message(message: Message, lobby: Lobby):
             f"Ожидание начала...")
 
     kb = InlineKeyboardBuilder()
-
-    # Кнопку старт видит только хост
-    if message.chat.id == lobby.host_id:
-        kb.add(InlineKeyboardButton(text="🚀 START GAME", callback_data=f"start_multi_{lobby.lobby_id}"))
-
+    kb.add(InlineKeyboardButton(text="🚀 START GAME", callback_data=f"start_multi_{lobby.lobby_id}"))
     kb.add(InlineKeyboardButton(text="🔙 Выйти", callback_data="leave_lobby"))
 
-    await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=lobby.host_id,
+            message_id=lobby.menu_message_id,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"⚠️ Error updating lobby UI: {e}")
 
 
 @router.callback_query(F.data.startswith("start_multi_"))
@@ -619,15 +631,15 @@ async def cmd_fake_join(message: Message):
         await message.answer("❌ Вы не в лобби или игра уже идет.")
         return
 
-    # Генерируем фейка
     fake_id = -random.randint(1000, 99999)
     fake_name = f"Fake_{random.choice(['Bob', 'Alice', 'John', 'Mike', 'Kate'])}"
 
     # chat_id ставим ТВОЙ
     lobby.add_player(fake_id, message.chat.id, fake_name)
 
-    await message.answer(f"✅ Добавлен бот-человек: {fake_name} (ID: {fake_id})")
-    await update_lobby_message(message, lobby)
+    await message.answer(f"✅ Добавлен бот-человек: {fake_name}")
+    # Обновляем интерфейс (используя сохраненный ID сообщения)
+    await update_lobby_message(bot, lobby)
 
 
 @router.message(Command("fake_say"))
@@ -642,11 +654,9 @@ async def cmd_fake_say(message: Message):
     lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
     if not lobby or lobby.status != "playing": return
 
-    # Проверяем, чей сейчас ход
     if lobby.current_turn_index >= len(lobby.game_players): return
     current_player = lobby.game_players[lobby.current_turn_index]
 
-    # Находим, является ли текущий игрок фейком в этом лобби
     player_data = next((p for p in lobby.players if p["name"] == current_player.name), None)
 
     if player_data and player_data["user_id"] < 0:
@@ -673,7 +683,6 @@ async def cmd_vote_as(message: Message):
     lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
     if not lobby or lobby.status != "playing": return
 
-    # Импорт внутри функции во избежание круговых зависимостей
     from src.multi_engine import handle_vote
     await handle_vote(lobby, bot, voter_name, target_name)
     await message.answer(f"✅ {voter_name} проголосовал за {target_name}")
@@ -694,7 +703,6 @@ async def multi_vote_handler(callback: CallbackQuery):
     lobby_p = next((p for p in lobby.players if p["user_id"] == user.id), None)
 
     if lobby_p:
-        # Проверка жив ли игрок
         game_p = next((p for p in lobby.game_players if p.name == lobby_p["name"]), None)
         if not game_p or not game_p.is_alive:
             await callback.answer("Мертвые не голосуют.", show_alert=True)

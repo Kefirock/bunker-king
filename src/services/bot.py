@@ -113,14 +113,20 @@ class BotEngine:
                 if len(parts) > 1: my_last_speech = parts[1]
                 break
 
+        # Генерируем список имен для промпта
+        candidates_str = ", ".join([p.name for p in valid_targets])
+
         template = cfg.prompts["bot_player"]["voting_user"]
+
+        # Передаем candidates_list
         prompt = template.format(
             name=bot_profile.name,
             profession=bot_profile.profession,
             personality=bot_profile.personality.description,
             threat_assessment=threat_assessment,
             history=history_text,
-            my_last_speech=my_last_speech
+            my_last_speech=my_last_speech,
+            candidates_list=candidates_str
         )
 
         response = await llm.generate(

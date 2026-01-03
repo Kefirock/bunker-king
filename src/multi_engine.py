@@ -145,7 +145,7 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
 # --- ЛОГИКА ГОЛОСОВАНИЯ ---
 
 async def start_multi_voting(lobby: Lobby, bot: Bot):
-    """Начинает фазу голосования (Персональные кнопки!)"""
+    """Начинает фазу голосования (Персональные кнопки + Поддержка фейков)"""
     lobby.votes.clear()
 
     # Генерируем уникальное меню для каждого игрока
@@ -154,6 +154,28 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
         if not game_p_self or not game_p_self.is_alive:
             continue
 
+            # --- ЕСЛИ ИГРОК ФЕЙК (DEBUG) ---
+        if p["user_id"] < 0:
+            candidates = []
+            for target in lobby.game_players:
+                if target.is_alive:
+                    if target.name == p["name"] and not cfg.gameplay["voting"]["allow_self_vote"]:
+                        continue
+                    candidates.append(target.name)
+
+            cand_str = " | ".join(candidates)
+            debug_msg = (
+                f"🗳 <b>[DEBUG {p['name']}] Голосование!</b>\n"
+                f"Кандидаты: {cand_str}\n"
+                f"Копируй команду:\n<code>/vote_as {p['name']} ИМЯ_ЦЕЛИ</code>"
+            )
+            try:
+                await bot.send_message(p["chat_id"], debug_msg, parse_mode="HTML")
+            except:
+                pass
+            continue  # Пропускаем генерацию кнопок для фейка
+
+        # --- ЕСЛИ ИГРОК ЧЕЛОВЕК ---
         kb = InlineKeyboardBuilder()
         for target in lobby.game_players:
             # Нельзя голосовать за себя (если запрещено конфигом)
@@ -166,17 +188,10 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
 
         msg_text = "🛑 <b>ГОЛОСОВАНИЕ ОБЪЯВЛЕНО</b>\nВыберите, кто покинет бункер."
 
-        if p["user_id"] < 0:
-            try:
-                await bot.send_message(p["chat_id"], f"<b>[DEBUG {p['name']}]</b> Голосование началось.",
-                                       parse_mode="HTML")
-            except:
-                pass
-        else:
-            try:
-                await bot.send_message(p["chat_id"], msg_text, reply_markup=kb.as_markup(), parse_mode="HTML")
-            except:
-                pass
+        try:
+            await bot.send_message(p["chat_id"], msg_text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        except:
+            pass
 
     # Голоса БОТОВ
     gs = lobby.game_state

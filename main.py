@@ -564,7 +564,12 @@ async def update_lobby_message(bot: Bot, lobby: Lobby):
         return
 
     total_needed = cfg.gameplay.get("setup", {}).get("total_players", 5)
-    players_list = "\n".join([f"- {p['name']}" for p in lobby.players])
+
+    # Звездочка для лидера
+    players_list = ""
+    for p in lobby.players:
+        mark = " ⭐" if p["user_id"] == lobby.host_id else ""
+        players_list += f"- {p['name']}{mark}\n"
 
     text = (f"🚪 <b>LOBBY {lobby.lobby_id}</b>\n"
             f"Игроков: {len(lobby.players)} / {total_needed}\n"
@@ -574,7 +579,7 @@ async def update_lobby_message(bot: Bot, lobby: Lobby):
 
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="🚀 START GAME", callback_data=f"start_multi_{lobby.lobby_id}"))
-    kb.add(InlineKeyboardButton(text="🔙 Выйти", callback_data="leave_lobby"))
+    kb.add(InlineKeyboardButton(text="🔙 Выйти", callback_data=f"leave_lobby_{lobby.lobby_id}"))
 
     try:
         await bot.edit_message_text(
@@ -586,6 +591,65 @@ async def update_lobby_message(bot: Bot, lobby: Lobby):
         )
     except Exception as e:
         print(f"⚠️ Error updating lobby UI: {e}")
+
+
+@router.callback_query(F.data.startswith("leave_lobby"))
+async def leave_lobby_handler(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    lobby = None
+
+    if len(parts) > 2:
+        lobby_id = parts[2]
+        lobby = lobby_manager.get_lobby(lobby_id)
+    else:
+        lobby = lobby_manager.find_lobby_by_user(callback.from_user.id)
+
+    if not lobby:
+        await callback.answer("Вы не в лобби.")
+        await callback.message.delete()
+        await state.set_state(GameFSM.MultiMenu)
+        await multi_mode_entry(callback, state)
+        return
+
+    user_id = callback.from_user.id
+    is_host = (user_id == lobby.host_id)
+
+    if is_host:
+        # ХОСТ ВЫХОДИТ -> УНИЧТОЖИТЬ ЛОББИ
+        lobby_manager.delete_lobby(lobby.lobby_id)
+
+        for p in lobby.players:
+            try:
+                if p["user_id"] == user_id:
+                    await bot.send_message(p["chat_id"], "🚫 Вы закрыли лобби.")
+                else:
+                    await bot.send_message(p["chat_id"],
+                                           f"🚫 Лидер комнаты <b>{lobby.players[0]['name']}</b> завершил сессию.",
+                                           parse_mode="HTML")
+            except:
+                pass
+
+        try:
+            await bot.delete_message(chat_id=lobby.host_id, message_id=lobby.menu_message_id)
+        except:
+            pass
+
+    else:
+        # ОБЫЧНЫЙ ВЫХОД
+        lobby.remove_player(user_id)
+        await callback.answer("Вы покинули лобби.")
+        await callback.message.delete()
+        await update_lobby_message(bot, lobby)
+
+    await state.set_state(GameFSM.MultiMenu)
+    # Возвращаем меню
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="🆕 Создать комнату", callback_data="lobby_create"))
+    kb.add(InlineKeyboardButton(text="🔍 Найти комнату", callback_data="lobby_list"))
+    kb.add(InlineKeyboardButton(text="🔙 Назад", callback_data="mode_back_to_start"))
+    kb.adjust(1)
+    await bot.send_message(callback.message.chat.id, "<b>👥 MULTIPLAYER MENU</b>", reply_markup=kb.as_markup(),
+                           parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("start_multi_"))

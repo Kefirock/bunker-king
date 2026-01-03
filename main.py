@@ -153,6 +153,28 @@ def get_display_topic(gs: GameState, player_trait: str = "", catastrophe_data: d
     return "..."
 
 
+# --- HELPER ДЛЯ ЛОГОВ (Чтобы использовать в двух местах) ---
+async def send_logs_auto_func(chat_id):
+    try:
+        logs_dir = "Logs"
+        if os.path.exists(logs_dir):
+            subdirs = [os.path.join(logs_dir, d) for d in os.listdir(logs_dir) if
+                       os.path.isdir(os.path.join(logs_dir, d))]
+            if subdirs:
+                latest = max(subdirs, key=os.path.getmtime)
+                folder_name = os.path.basename(latest)
+                success = await asyncio.to_thread(s3_uploader.upload_session_folder, latest)
+                if success:
+                    await bot.send_message(chat_id, f"💾 Логи игры <b>{folder_name}</b> сохранены в облако.",
+                                           parse_mode="HTML")
+                    try:
+                        shutil.rmtree(latest)
+                    except:
+                        pass
+    except:
+        pass
+
+
 # ==========================================
 #              HANDLERS: MENU
 # ==========================================
@@ -419,13 +441,14 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
     for name, cnt in counts.items():
         result_text += f"- {name}: {cnt}\n"
 
+    # --- ЛОГИКА НИЧЬЕЙ (SOLO) ---
     if len(leaders) > 1:
-        if gs.runoff_count >= cfg.gameplay["voting"]["max_runoffs"]:
-            loser_name = random.choice(leaders)
-            result_text += f"\n⚖️ Снова ничья. Жребий выбрал: <b>{loser_name}</b>"
+        if gs.runoff_count >= 1:  # 2-я ничья
+            result_text += f"\n⚖️ <b>СНОВА НИЧЬЯ!</b>\n🚫 <b>БУНКЕР ЗАКРЫЛСЯ.</b> Вы слишком долго спорили.\n💀 <b>GAME OVER</b>"
             await callback.message.answer(result_text, parse_mode="HTML")
-            await eliminate_player(loser_name, chat_id, state)
+            await eliminate_player("EVERYONE_DIED", chat_id, state)
             return
+
         gs.phase = "runoff"
         gs.runoff_candidates = leaders
         gs.runoff_count += 1
@@ -441,44 +464,31 @@ async def voting_handler(callback: CallbackQuery, state: FSMContext):
 async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
     data = await state.get_data()
     players = [PlayerProfile(**p) for p in data["players"]]
-    survivors = [p for p in players if p.name != loser_name]
 
-    async def send_logs_auto():
-        try:
-            logs_dir = "Logs"
-            if os.path.exists(logs_dir):
-                subdirs = [os.path.join(logs_dir, d) for d in os.listdir(logs_dir) if
-                           os.path.isdir(os.path.join(logs_dir, d))]
-                if subdirs:
-                    latest = max(subdirs, key=os.path.getmtime)
-                    folder_name = os.path.basename(latest)
-                    success = await asyncio.to_thread(s3_uploader.upload_session_folder, latest)
-                    if success:
-                        await bot.send_message(chat_id, f"💾 Логи игры <b>{folder_name}</b> сохранены в облако.",
-                                               parse_mode="HTML")
-                        try:
-                            shutil.rmtree(latest)
-                        except:
-                            pass
-        except:
-            pass
+    # Спец флаг для смерти всех
+    if loser_name == "EVERYONE_DIED":
+        await send_logs_auto_func(chat_id)
+        await state.clear()
+        return
+
+    survivors = [p for p in players if p.name != loser_name]
 
     if not any(p.is_human for p in survivors):
         await bot.send_message(chat_id, "💀 <b>GAME OVER</b>. Вы погибли.", parse_mode="HTML")
-        await send_logs_auto()
+        await send_logs_auto_func(chat_id)
         await state.clear()
         return
 
     if len(survivors) <= cfg.gameplay["rounds"]["target_survivors"]:
         names = ", ".join([p.name for p in survivors])
         await bot.send_message(chat_id, f"🎉 <b>ПОБЕДА!</b> Выжили: {names}", parse_mode="HTML")
-        await send_logs_auto()
+        await send_logs_auto_func(chat_id)
         await state.clear()
         return
 
     gs = GameState(**data["game_state"])
     gs.runoff_candidates = []
-    gs.runoff_count = 0
+    gs.runoff_count = 0  # СБРОС СЧЕТЧИКА НИЧЬИХ
     gs.round += 1
     gs.topic = get_topic_for_round_base(gs.round, trait="...", catastrophe_data=data.get("catastrophe"))
 
@@ -512,8 +522,6 @@ async def back_to_start(callback: CallbackQuery, state: FSMContext):
 async def create_lobby_handler(callback: CallbackQuery, state: FSMContext):
     user = callback.from_user
     lobby = lobby_manager.create_lobby(user.id, user.first_name)
-
-    # Сохраняем ID сообщения, которое будем редактировать
     lobby.menu_message_id = callback.message.message_id
 
     await update_lobby_message(bot, lobby)
@@ -550,7 +558,6 @@ async def join_lobby_handler(callback: CallbackQuery, state: FSMContext):
     user = callback.from_user
     lobby.add_player(user.id, callback.message.chat.id, user.first_name)
 
-    # Если зашел хост, обновляем указатель на сообщение меню
     if user.id == lobby.host_id:
         lobby.menu_message_id = callback.message.message_id
 
@@ -565,7 +572,6 @@ async def update_lobby_message(bot: Bot, lobby: Lobby):
 
     total_needed = cfg.gameplay.get("setup", {}).get("total_players", 5)
 
-    # Звездочка для лидера
     players_list = ""
     for p in lobby.players:
         mark = " ⭐" if p["user_id"] == lobby.host_id else ""
@@ -719,6 +725,7 @@ async def cmd_fake_say(message: Message):
     lobby = lobby_manager.find_lobby_by_user(message.from_user.id)
     if not lobby or lobby.status != "playing": return
 
+    # Проверка чтобы не выйти за границы
     if lobby.current_turn_index >= len(lobby.game_players): return
     current_player = lobby.game_players[lobby.current_turn_index]
 

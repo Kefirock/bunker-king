@@ -674,7 +674,8 @@ async def start_multi_handler(callback: CallbackQuery, state: FSMContext):
     # Рассылка интро
     intro = f"🎬 <b>ИГРА НАЧАЛАСЬ!</b>\n\n"
     for p in game_players:
-        role = p.profession if p.is_human else "???"
+        # --- FIX: ПОКАЗЫВАЕМ ПРОФЕССИЮ ВСЕМ (И БОТАМ ТОЖЕ) ---
+        role = p.profession
         intro += f"- {p.name}: {role}\n"
 
     await broadcast(lobby, intro, bot)

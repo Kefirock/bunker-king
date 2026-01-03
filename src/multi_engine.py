@@ -25,7 +25,7 @@ def get_topic_base(round_num, trait="", cat_data=None):
         return topics_cfg[2].format(trait=trait)
     else:
         if cat_data:
-            idx = (round_num - 3) % len(cat_data["topics"])
+            idx = (round_num - 3) % len(catastrophe_data["topics"])  # исправил опечатку с cat_data
             return topics_cfg[3].format(catastrophe_problem=cat_data["topics"][idx])
         return "ВЫЖИВАНИЕ."
 
@@ -82,6 +82,14 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
         return
 
     current_player = players[lobby.current_turn_index]
+
+    # --- FIX: ПРОПУСК МЕРТВЫХ ИГРОКОВ ---
+    if not current_player.is_alive:
+        lobby.current_turn_index += 1
+        await process_multi_turn(lobby, bot)
+        return
+    # ------------------------------------
+
     actual_topic = get_display_topic(gs, current_player, lobby.catastrophe_data)
 
     # ХОД
@@ -125,11 +133,16 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
 
     current_player = lobby.game_players[lobby.current_turn_index]
 
+    # Доп проверка, что игрок жив (на всякий случай)
+    if not current_player.is_alive:
+        lobby.current_turn_index += 1
+        await process_multi_turn(lobby, bot)
+        return
+
     if current_player.name != user_name: return
 
     lobby.game_state.history.append(f"[{current_player.name}]: {text}")
 
-    # Ищем user_id автора, чтобы исключить его из рассылки (убираем дубликат)
     author_user_id = None
     for p in lobby.players:
         if p["name"] == user_name:
@@ -145,16 +158,17 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
 # --- ЛОГИКА ГОЛОСОВАНИЯ ---
 
 async def start_multi_voting(lobby: Lobby, bot: Bot):
-    """Начинает фазу голосования (Персональные кнопки + Поддержка фейков)"""
+    """Начинает фазу голосования"""
     lobby.votes.clear()
 
-    # Генерируем уникальное меню для каждого игрока
     for p in lobby.players:
         game_p_self = next((gp for gp in lobby.game_players if gp.name == p["name"]), None)
+        # Мертвые не голосуют
         if not game_p_self or not game_p_self.is_alive:
+            # Можно отправить уведомление, что голосование началось, но они наблюдатели
             continue
 
-            # --- ЕСЛИ ИГРОК ФЕЙК (DEBUG) ---
+            # DEBUG для фейков
         if p["user_id"] < 0:
             candidates = []
             for target in lobby.game_players:
@@ -173,21 +187,18 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
                 await bot.send_message(p["chat_id"], debug_msg, parse_mode="HTML")
             except:
                 pass
-            continue  # Пропускаем генерацию кнопок для фейка
+            continue
 
-        # --- ЕСЛИ ИГРОК ЧЕЛОВЕК ---
+            # Для людей
         kb = InlineKeyboardBuilder()
         for target in lobby.game_players:
-            # Нельзя голосовать за себя (если запрещено конфигом)
             if target.is_alive:
                 if target.name == p["name"] and not cfg.gameplay["voting"]["allow_self_vote"]:
                     continue
                 kb.add(InlineKeyboardButton(text=f"☠ {target.name}", callback_data=f"mvote_{target.name}"))
 
         kb.adjust(1)
-
         msg_text = "🛑 <b>ГОЛОСОВАНИЕ ОБЪЯВЛЕНО</b>\nВыберите, кто покинет бункер."
-
         try:
             await bot.send_message(p["chat_id"], msg_text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except:
@@ -226,11 +237,25 @@ async def finish_voting(lobby: Lobby, bot: Bot):
 
     await broadcast(lobby, f"{result_text}\n🚪 <b>{leader_name}</b> изгнан.", bot)
 
+    # Удаляем игрока
     for p in lobby.game_players:
         if p.name == leader_name:
             p.is_alive = False
             break
 
+    # Если изгнали человека - пишем ему GAME OVER в личку (через бродкаст не сработает таргетированно)
+    # Ищем его chat_id
+    leader_chat_user = next((p for p in lobby.players if p["name"] == leader_name), None)
+    if leader_chat_user:
+        try:
+            msg = "💀 <b>GAME OVER</b>. Вас изгнали. Вы стали наблюдателем."
+            # Если это фейк - пометка
+            if leader_chat_user["user_id"] < 0: msg = f"<b>[DEBUG {leader_name}]</b> {msg}"
+            await bot.send_message(leader_chat_user["chat_id"], msg, parse_mode="HTML")
+        except:
+            pass
+
+    # Проверка условий победы/поражения
     humans_alive = any(p.is_human and p.is_alive for p in lobby.game_players)
     if not humans_alive:
         await broadcast(lobby, "💀 <b>GAME OVER</b>. Все люди погибли.", bot)

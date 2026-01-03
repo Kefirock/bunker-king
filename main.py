@@ -490,7 +490,7 @@ async def update_lobby_message(bot: Bot, lobby: Lobby):
         players_list += f"- {p['name']}{mark}\n"
 
     text = (
-        f"🚪 <b>LOBBY {lobby.lobby_id}</b>\nIгроков: {len(lobby.players)} / {total_needed}\n<b>Список:</b>\n{players_list}")
+        f"🚪 <b>Лобби {lobby.lobby_id}</b>\nИгроков: {len(lobby.players)} / {total_needed}\n<b>Список:</b>\n{players_list}")
 
     kb = InlineKeyboardBuilder()
     kb.add(InlineKeyboardButton(text="🚀 START GAME", callback_data=f"start_multi_{lobby.lobby_id}"))

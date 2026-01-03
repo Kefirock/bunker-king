@@ -6,21 +6,33 @@ import logging
 import sys
 
 
-# Фильтр, чтобы "сырые" данные LLM не засоряли консоль
+# Фильтр для консоли
 class ConsoleFilter(logging.Filter):
     def filter(self, record):
         return record.name != "LLM_RAW"
 
 
 class GameLogger:
-    def __init__(self):
-        # Папка, куда будет смонтирован Volume (/app/Logs)
+    def __init__(self, mode: str, username: str):
+        """
+        mode: "Solo" или "Multiplayer"
+        username: Имя игрока (соло) или лидера лобби (мульти)
+        """
         self.base_log_dir = "Logs"
-        self.current_session_dir = None
 
-        self.chat_logger = None
-        self.logic_logger = None
-        self.raw_logger = None
+        # 1. Очистка имени от спецсимволов
+        safe_name = re.sub(r'[\\/*?:"<>| ]', "_", username).strip() or "Unknown"
+
+        # 2. Формирование пути: Logs / Mode / Username / Timestamp
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.session_dir = os.path.join(self.base_log_dir, mode, safe_name, timestamp)
+
+        os.makedirs(self.session_dir, exist_ok=True)
+
+        # 3. Создаем отдельные логгеры для этой сессии
+        self.chat_logger = self._create_file_logger(f"chat_{timestamp}_{id(self)}", "chat_history.log")
+        self.logic_logger = self._create_file_logger(f"logic_{timestamp}_{id(self)}", "game_logic.log")
+        self.raw_logger = self._create_file_logger(f"raw_{timestamp}_{id(self)}", "raw_debug.log")
 
         self.icons = {
             "DIRECTOR": "🎬", "JUDGE": "⚖️", "BOT_THOUGHT": "🧠",
@@ -31,35 +43,16 @@ class GameLogger:
             "HUMAN_TURN": "👉", "VOTE_RESULTS": "📊"
         }
 
-        # Создаем базовую папку
-        os.makedirs(self.base_log_dir, exist_ok=True)
-        self._setup_console_logging()
+        start_msg = f"=== NEW {mode.upper()} SESSION: {username} | {timestamp} ==="
+        logging.info(start_msg)  # В общую консоль
+        if self.logic_logger: self.logic_logger.info(start_msg)  # В файл
 
-    def _setup_console_logging(self):
-        """Настраивает общий вывод в консоль (то, что видно в Koyeb)."""
-        root = logging.getLogger()
-        root.setLevel(logging.INFO)
-
-        # Очистка старых хендлеров
-        for h in root.handlers[:]: root.removeHandler(h)
-
-        # Вывод в stdout (Консоль)
-        console = logging.StreamHandler(sys.stdout)
-        console.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-        console.addFilter(ConsoleFilter())
-        root.addHandler(console)
-
-        # Глушим шум библиотек
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("aiogram").setLevel(logging.INFO)
-        logging.getLogger("boto3").setLevel(logging.WARNING)
-        logging.getLogger("botocore").setLevel(logging.WARNING)
-
-    def _create_file_logger(self, name: str, filepath: str):
-        """Создает отдельный логгер, который пишет ТОЛЬКО в файл."""
+    def _create_file_logger(self, name: str, filename: str):
+        """Создает логгер, пишущий только в конкретный файл сессии"""
+        filepath = os.path.join(self.session_dir, filename)
         logger = logging.getLogger(name)
         logger.setLevel(logging.INFO)
-        logger.propagate = False  # <--- ВАЖНО: Не дублировать в консоль
+        logger.propagate = False  # Не дублировать в root
 
         if logger.hasHandlers():
             logger.handlers.clear()
@@ -69,64 +62,26 @@ class GameLogger:
         logger.addHandler(fh)
         return logger
 
-    def new_session(self, username: str) -> None:
-        """Создает папку сессии и файлы."""
-        # 1. Очистка имени пользователя для безопасности файловой системы
-        safe_name = re.sub(r'[\\/*?:"<>| ]', "_", username).strip() or "Unknown"
-
-        # 2. Таймстемп
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-        # 3. Формируем имя папки по ТЗ: Username_Date_Time
-        folder_name = f"{safe_name}_{timestamp}"
-
-        self.current_session_dir = os.path.join(self.base_log_dir, folder_name)
-        os.makedirs(self.current_session_dir, exist_ok=True)
-
-        # 4. Создаем файлы с фиксированными именами внутри уникальной папки
-        self.chat_logger = self._create_file_logger(
-            f"chat_{timestamp}",
-            os.path.join(self.current_session_dir, "chat_history.log")
-        )
-
-        self.logic_logger = self._create_file_logger(
-            f"logic_{timestamp}",
-            os.path.join(self.current_session_dir, "game_logic.log")
-        )
-
-        self.raw_logger = self._create_file_logger(
-            "LLM_RAW",
-            os.path.join(self.current_session_dir, "raw_debug.log")
-        )
-
-        start_msg = f"=== NEW SESSION STARTED: {username} ==="
-        logging.info(start_msg)  # В консоль
-        if self.logic_logger: self.logic_logger.info(start_msg)  # В файл
-
     def log_chat_message(self, speaker: str, message: str) -> None:
         msg = f"[{speaker}]: {message}"
-        # В файл
         if self.chat_logger: self.chat_logger.info(msg)
-        # В консоль (кратко)
+        # В консоль дублируем кратко
         logging.info(f"💬 {msg}")
 
     def log_game_event(self, event_type: str, message: str, details: dict = None) -> None:
         icon = self.icons.get(event_type.upper(), self.icons["INFO"])
         log_msg = f"{icon} [{event_type}] {message}"
 
-        # В файл (подробно с JSON)
         if self.logic_logger:
             file_msg = log_msg
             if details:
                 file_msg += f"\nDetails: {json.dumps(details, ensure_ascii=False, indent=2)}\n{'-' * 40}"
             self.logic_logger.info(file_msg)
 
-        # В консоль (только заголовок, без простыни JSON)
         logging.info(log_msg)
 
     def log_llm_interaction(self, service_name: str, model_id: str, prompt: list, response: str,
                             is_json_mode: bool) -> None:
-        """Пишет сырые данные ТОЛЬКО в файл raw_debug.log"""
         entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "service": service_name,
@@ -138,5 +93,25 @@ class GameLogger:
         if self.raw_logger:
             self.raw_logger.info(json.dumps(entry, ensure_ascii=False, indent=2))
 
+    def get_session_path(self) -> str:
+        """Возвращает путь к папке для S3 uploader"""
+        return self.session_dir
 
-game_logger = GameLogger()
+
+# Настройка общей консоли (запускается при импорте)
+def setup_console():
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for h in root.handlers[:]: root.removeHandler(h)
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    console.addFilter(ConsoleFilter())
+    root.addHandler(console)
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("aiogram").setLevel(logging.INFO)
+    logging.getLogger("boto3").setLevel(logging.WARNING)
+    logging.getLogger("botocore").setLevel(logging.WARNING)
+
+
+setup_console()

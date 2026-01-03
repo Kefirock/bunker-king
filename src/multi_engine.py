@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 from collections import Counter
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton
@@ -11,6 +12,7 @@ from src.services.director import DirectorEngine
 from src.services.judge import JudgeService
 from src.schemas import PlayerProfile, GameState
 from src.utils import GameSetup
+from src.s3_service import s3_uploader
 
 bot_engine = BotEngine()
 judge_service = JudgeService()
@@ -42,7 +44,11 @@ def get_display_topic(gs: GameState, p: PlayerProfile, cat_data: dict) -> str:
 
 
 async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None, reply_markup=None):
-    """Рассылает сообщение. Фейки получают пометку DEBUG, люди - чистый текст."""
+    """Рассылает сообщение."""
+    # Логируем в файл лобби
+    if lobby.logger:
+        lobby.logger.log_chat_message("SYSTEM", text)
+
     for p in lobby.players:
         if exclude_id and p["user_id"] == exclude_id:
             continue
@@ -50,15 +56,11 @@ async def broadcast(lobby: Lobby, text: str, bot: Bot, exclude_id: int = None, r
         target_chat_id = p["chat_id"]
         final_text = text
 
-        # --- ЛОГИКА ОТОБРАЖЕНИЯ ---
         if p["user_id"] < 0:
-            # Это фейк. Админ должен видеть, кому пришло сообщение.
-            final_text = f"<b>[DEBUG {p['name']}]</b>\n{text}"
-        # Для реальных людей (user_id > 0) текст остается оригинальным.
+            final_text = f"<b>[DEBUG for {p['name']}]</b>\n{text}"
 
         try:
             await bot.send_message(target_chat_id, final_text, parse_mode="HTML", reply_markup=reply_markup)
-            # Небольшая задержка для фейков, чтобы админа не зафлудило
             if p["user_id"] < 0: await asyncio.sleep(0.3)
         except:
             pass
@@ -71,7 +73,6 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
     gs = lobby.game_state
     players = lobby.game_players
 
-    # Защита от выхода за границы
     if lobby.current_turn_index >= len(players):
         if gs.phase == "presentation":
             gs.phase = "discussion"
@@ -92,12 +93,9 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
 
     current_player = players[lobby.current_turn_index]
 
-    # Пропуск мертвых и молчащих в перестрелке
     skip_turn = False
-    if not current_player.is_alive:
-        skip_turn = True
-    if gs.phase == "runoff" and current_player.name not in gs.runoff_candidates:
-        skip_turn = True
+    if not current_player.is_alive: skip_turn = True
+    if gs.phase == "runoff" and current_player.name not in gs.runoff_candidates: skip_turn = True
 
     if skip_turn:
         lobby.current_turn_index += 1
@@ -106,25 +104,17 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
 
     actual_topic = get_display_topic(gs, current_player, lobby.catastrophe_data)
 
-    # ХОД
     if current_player.is_human:
         target_user = next((p for p in lobby.players if p["name"] == current_player.name), None)
 
         if target_user:
-            # Уведомление всем
             await broadcast(lobby, f"👉 Ходит <b>{current_player.name}</b>...", bot, exclude_id=target_user["user_id"])
-
-            # Личное сообщение игроку
             msg_text = f"👤 <b>ТВОЙ ХОД!</b>\nТема: {actual_topic}\nНапиши сообщение в чат."
-
-            # Если это фейк, добавляем подсказку для админа
             if target_user["user_id"] < 0:
-                msg_text = f"<b>[DEBUG {target_user['name']}]</b>\n{msg_text}\n<i>Команда: /fake_say ТЕКСТ</i>"
-
+                msg_text = f"<b>[DEBUG for {target_user['name']}]</b>\n{msg_text}"
             await bot.send_message(target_user["chat_id"], msg_text, parse_mode="HTML")
             return
     else:
-        # Ход бота
         await broadcast(lobby, f"🤖 <b>{current_player.name}</b> печатает...", bot)
         temp_gs = gs.model_copy()
         temp_gs.topic = actual_topic
@@ -133,6 +123,10 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
         speech = await bot_engine.make_turn(current_player, players, temp_gs, instr)
 
         gs.history.append(f"[{current_player.name}]: {speech}")
+
+        # Логируем речь бота
+        if lobby.logger:
+            lobby.logger.log_chat_message(current_player.name, speech)
 
         display_name = GameSetup.get_display_name(current_player, gs.round)
         await broadcast(lobby, f"🤖 <b>{display_name}</b>:\n{speech}", bot)
@@ -143,7 +137,7 @@ async def process_multi_turn(lobby: Lobby, bot: Bot):
 
 
 async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str):
-    """Обработка текста"""
+    """Обработка текста игрока"""
     if lobby.game_state.phase not in ["presentation", "discussion", "runoff"]: return
     if lobby.current_turn_index >= len(lobby.game_players): return
 
@@ -157,6 +151,13 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
     if current_player.name != user_name: return
 
     lobby.game_state.history.append(f"[{current_player.name}]: {text}")
+
+    # Логируем речь человека
+    if lobby.logger:
+        lobby.logger.log_chat_message(current_player.name, text)
+        # Судья тоже пишет в этот логгер
+        actual_topic = get_display_topic(lobby.game_state, current_player, lobby.catastrophe_data)
+        asyncio.create_task(judge_service.analyze_move(current_player, text, actual_topic, logger=lobby.logger))
 
     author_user_id = None
     for p in lobby.players:
@@ -173,46 +174,39 @@ async def handle_human_message(lobby: Lobby, bot: Bot, text: str, user_name: str
 # --- ЛОГИКА ГОЛОСОВАНИЯ ---
 
 async def start_multi_voting(lobby: Lobby, bot: Bot):
-    """Начинает фазу голосования"""
     lobby.votes.clear()
-
     title = "ГОЛОСОВАНИЕ"
     if lobby.game_state.phase == "runoff" or lobby.game_state.runoff_candidates:
         title = f"ПЕРЕГОЛОСОВАНИЕ ({' vs '.join(lobby.game_state.runoff_candidates)})"
+
+    if lobby.logger:
+        lobby.logger.log_game_event("VOTE_START", title)
 
     for p in lobby.players:
         game_p_self = next((gp for gp in lobby.game_players if gp.name == p["name"]), None)
         if not game_p_self or not game_p_self.is_alive:
             continue
 
-            # Цели (все живые или кандидаты runoff)
         valid_targets = []
         if lobby.game_state.runoff_candidates:
             valid_targets = [t for t in lobby.game_players if t.name in lobby.game_state.runoff_candidates]
         else:
             valid_targets = [t for t in lobby.game_players if t.is_alive]
 
-        # --- ЕСЛИ ФЕЙК (DEBUG ИНСТРУКЦИЯ) ---
         if p["user_id"] < 0:
             candidates = []
             for target in valid_targets:
                 if target.name == p["name"] and not cfg.gameplay["voting"]["allow_self_vote"]:
                     continue
                 candidates.append(target.name)
-
             cand_str = " | ".join(candidates)
-            debug_msg = (
-                f"🗳 <b>[DEBUG {p['name']}] {title}!</b>\n"
-                f"Кандидаты: {cand_str}\n\n"
-                f"Копируй: <code>/vote_as {p['name']} ИМЯ</code>"
-            )
+            debug_msg = f"🗳 <b>[DEBUG {p['name']}] {title}!</b>\nВарианты: {cand_str}"
             try:
                 await bot.send_message(p["chat_id"], debug_msg, parse_mode="HTML")
             except:
                 pass
             continue
 
-            # --- ЕСЛИ ЧЕЛОВЕК (КНОПКИ) ---
         kb = InlineKeyboardBuilder()
         for target in valid_targets:
             if target.name == p["name"] and not cfg.gameplay["voting"]["allow_self_vote"]:
@@ -226,9 +220,7 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
         except:
             pass
 
-    # Голоса БОТОВ
     gs = lobby.game_state
-
     if gs.runoff_candidates:
         bot_targets = [t for t in lobby.game_players if t.name in gs.runoff_candidates]
     else:
@@ -241,20 +233,18 @@ async def start_multi_voting(lobby: Lobby, bot: Bot):
 
 
 async def handle_vote(lobby: Lobby, bot: Bot, voter_name: str, target_name: str):
-    """Принимает голос"""
     lobby.votes[voter_name] = target_name
+    if lobby.logger:
+        lobby.logger.log_game_event("VOTE", f"{voter_name} -> {target_name}")
 
     alive_players = [p for p in lobby.game_players if p.is_alive]
-
     if len(lobby.votes) >= len(alive_players):
         await finish_voting(lobby, bot)
 
 
 async def finish_voting(lobby: Lobby, bot: Bot):
-    """Подсчет итогов"""
     counts = Counter(lobby.votes.values())
     results = counts.most_common()
-
     if not results: return
 
     leader_name, leader_votes = results[0]
@@ -264,15 +254,17 @@ async def finish_voting(lobby: Lobby, bot: Bot):
     for name, cnt in counts.items():
         result_text += f"- {name}: {cnt}\n"
 
+    if lobby.logger:
+        lobby.logger.log_game_event("VOTE_RESULTS", str(dict(counts)))
+
     gs = lobby.game_state
 
     # --- НИЧЬЯ ---
     if len(leaders) > 1:
         if gs.runoff_count >= 1:
-            await broadcast(lobby,
-                            f"{result_text}\n⚖️ <b>НИЧЬЯ №2!</b>\n🚫 <b>БУНКЕР ЗАКРЫЛСЯ.</b> Вы слишком долго спорили.\n💀 <b>GAME OVER</b>",
+            await broadcast(lobby, f"{result_text}\n⚖️ <b>НИЧЬЯ №2!</b>\n🚫 <b>БУНКЕР ЗАКРЫЛСЯ.</b>\n💀 <b>GAME OVER</b>",
                             bot)
-            lobby.status = "finished"
+            await close_multi_lobby(lobby)
             return
 
         gs.phase = "runoff"
@@ -281,14 +273,12 @@ async def finish_voting(lobby: Lobby, bot: Bot):
         lobby.current_turn_index = 0
         lobby.votes.clear()
 
-        await broadcast(lobby,
-                        f"{result_text}\n⚖️ <b>НИЧЬЯ!</b> ({' vs '.join(leaders)})\n🗣 Объявляется ПЕРЕСТРЕЛКА. Кандидаты, у вас есть последнее слово.",
-                        bot)
+        await broadcast(lobby, f"{result_text}\n⚖️ <b>НИЧЬЯ!</b> ({' vs '.join(leaders)})\n🗣 ПЕРЕСТРЕЛКА.", bot)
         await asyncio.sleep(2)
         await process_multi_turn(lobby, bot)
         return
 
-    # --- ЕСТЬ ПОБЕДИТЕЛЬ ---
+    # --- ПОБЕДИТЕЛЬ ---
     await broadcast(lobby, f"{result_text}\n🚪 <b>{leader_name}</b> изгнан.", bot)
 
     for p in lobby.game_players:
@@ -296,32 +286,29 @@ async def finish_voting(lobby: Lobby, bot: Bot):
             p.is_alive = False
             break
 
-    # КИК (если человек)
     leader_user = next((p for p in lobby.players if p["name"] == leader_name), None)
     if leader_user:
         try:
-            msg = "💀 <b>GAME OVER</b>. Вас изгнали из общины."
+            msg = "💀 <b>GAME OVER</b>. Вас изгнали."
             if leader_user["user_id"] < 0: msg = f"<b>[DEBUG {leader_name}]</b> {msg}"
             await bot.send_message(leader_user["chat_id"], msg, parse_mode="HTML")
             lobby.remove_player(leader_user["user_id"])
         except:
             pass
 
-    # Проверка условий
     humans_alive = any(p.is_human and p.is_alive for p in lobby.game_players)
     if not humans_alive:
         await broadcast(lobby, "💀 <b>GAME OVER</b>. Все люди погибли.", bot)
-        lobby.status = "finished"
+        await close_multi_lobby(lobby)
         return
 
     survivors_count = sum(1 for p in lobby.game_players if p.is_alive)
     if survivors_count <= cfg.gameplay["rounds"]["target_survivors"]:
         names = ", ".join([p.name for p in lobby.game_players if p.is_alive])
         await broadcast(lobby, f"🎉 <b>ПОБЕДА!</b> Выжили: {names}", bot)
-        lobby.status = "finished"
+        await close_multi_lobby(lobby)
         return
 
-    # НОВЫЙ РАУНД
     gs.round += 1
     gs.phase = "presentation"
     lobby.current_turn_index = 0
@@ -335,3 +322,15 @@ async def finish_voting(lobby: Lobby, bot: Bot):
     await asyncio.sleep(3)
     await broadcast(lobby, f"🔔 <b>РАУНД {gs.round}</b>\nТема: {base_topic}", bot)
     await process_multi_turn(lobby, bot)
+
+
+async def close_multi_lobby(lobby: Lobby):
+    """Тихо завершает игру и выгружает логи"""
+    lobby.status = "finished"
+    if lobby.logger:
+        try:
+            path = lobby.logger.get_session_path()
+            await asyncio.to_thread(s3_uploader.upload_session_folder, path)
+            shutil.rmtree(path)
+        except:
+            pass

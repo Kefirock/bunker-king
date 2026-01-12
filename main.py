@@ -1,8 +1,9 @@
+--- START OF FILE main.py ---
+
 import asyncio
 import logging
 import os
 import sys
-import socket
 import random
 import shutil
 import aiohttp
@@ -21,7 +22,7 @@ from aiohttp import web
 from aiogram.exceptions import TelegramNetworkError
 
 # Импорты
-from src.proxy_manager import ProxyManager
+# (ProxyManager удален)
 from src.config import cfg
 from src.utils import GameSetup
 from src.schemas import GameState, PlayerProfile
@@ -35,34 +36,7 @@ from src.multi_engine import process_multi_turn, handle_human_message, broadcast
 
 load_dotenv(os.path.join("Configs", ".env"))
 
-# DNS FIX
-if os.getenv("ENABLE_DNS_FIX", "false").lower() == "true":
-    try:
-        import dns.resolver
-
-        original_getaddrinfo = socket.getaddrinfo
-
-
-        def global_dns_patch(host, port, family=0, type=0, proto=0, flags=0):
-            try:
-                if host in ["localhost", "127.0.0.1", "0.0.0.0"]:
-                    return original_getaddrinfo(host, port, family, type, proto, flags)
-            except:
-                pass
-            try:
-                resolver = dns.resolver.Resolver()
-                resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-                answer = resolver.resolve(host, 'A')
-                ip_list = [r.to_text() for r in answer]
-                selected_ip = random.choice(ip_list)
-                return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (selected_ip, port))]
-            except:
-                return original_getaddrinfo(host, port, family, type, proto, flags)
-
-
-        socket.getaddrinfo = global_dns_patch
-    except:
-        pass
+# --- DNS FIX УДАЛЕН ---
 
 bot_engine = BotEngine()
 judge_service = JudgeService()
@@ -351,8 +325,6 @@ async def human_turn_handler(message: Message, state: FSMContext):
 
     gs.history.append(f"[{player.name}]: {text_to_process}")
 
-    # "Принято" УБРАНО
-
     data["players"] = [p.model_dump() for p in players]
     data["game_state"] = gs.model_dump()
     data["current_turn_index"] += 1
@@ -383,7 +355,6 @@ async def start_voting(chat_id: int, state: FSMContext):
 
 @router.callback_query(GameFSM.Voting, F.data.startswith("vote_"))
 async def voting_handler(callback: CallbackQuery, state: FSMContext):
-    # ВАЖНО: Разделитель с limit=1 для имен с подчеркиваниями
     target_name = callback.data.split("_", 1)[1]
 
     data = await state.get_data()
@@ -499,7 +470,6 @@ async def eliminate_player(loser_name: str, chat_id: int, state: FSMContext):
 
 
 # ================= MULTIPLAYER HANDLERS =================
-# ... (Остальной код мультиплеера идентичен предыдущему, но нужно обновить вызовы в multi_engine)
 @router.callback_query(F.data == "mode_multi")
 async def multi_mode_entry(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
@@ -707,7 +677,6 @@ async def cmd_vote_as(message: Message):
 
 @router.callback_query(F.data.startswith("mvote_"))
 async def multi_vote_handler(callback: CallbackQuery):
-    # ВАЖНО: Разделитель с limit=1
     target_name = callback.data.split("_", 1)[1]
     user = callback.from_user
     lobby = lobby_manager.find_lobby_by_user(user.id)
@@ -736,31 +705,27 @@ async def main():
     await start_dummy_server()
     global bot
     BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN: return
-    enable_proxy = os.getenv("ENABLE_PROXY", "false").lower() == "true"
-    proxy_manager = ProxyManager("proxies.txt") if enable_proxy else None
+    if not BOT_TOKEN:
+        print("ERROR: BOT_TOKEN is missing")
+        return
 
-    while True:
-        session = None
-        if enable_proxy and proxy_manager:
-            current = proxy_manager.get_next_proxy()
-            session = AiohttpSession(proxy=current) if current else AiohttpSession()
-        else:
-            session = AiohttpSession()
+    # Обычная сессия без прокси
+    session = AiohttpSession()
+    bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
 
-        bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot)
-        except Exception as e:
-            print(f"Error: {e}")
-            await asyncio.sleep(5)
-        finally:
-            if bot and bot.session: await bot.session.close()
+    try:
+        print("Bot started directly...")
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        if bot and bot.session:
+            await bot.session.close()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except:
+    except KeyboardInterrupt:
         pass

@@ -267,6 +267,10 @@ class BunkerGame(GameEngine):
 
     async def _finish_voting(self) -> List[GameEvent]:
         events = []
+        if not self.votes:
+            # Если никто не проголосовал (баг или все ливнули)
+            return [GameEvent(type="message", content="Никто не проголосовал.")]
+
         counts = Counter(self.votes.values())
         results = counts.most_common()
 
@@ -295,10 +299,22 @@ class BunkerGame(GameEngine):
             return events
 
         # ИЗГНАНИЕ
-        eliminated = next((p for p in self.players if p.name == leader_name), None)
+        # --- ФИКС: Более надежный поиск по имени ---
+        eliminated = None
+        for p in self.players:
+            if p.name.strip() == leader_name.strip():
+                eliminated = p
+                break
+
         if eliminated:
             eliminated.is_alive = False
-            events.append(GameEvent(type="message", content=f"🚪 <b>{leader_name}</b> был изгнан."))
+            # Важно: если человек говорил прямо перед смертью, история могла сохраниться
+            # но в active_list следующего раунда он уже не попадет.
+            events.append(GameEvent(type="message", content=f"🚪 <b>{eliminated.name}</b> был изгнан."))
+        else:
+            # Если имя не найдено (крайне редкий случай)
+            events.append(
+                GameEvent(type="message", content=f"⚠️ Ошибка: Не удалось найти игрока '{leader_name}' для изгнания."))
 
         # ПРОВЕРКА ПОБЕДЫ
         survivors = [p for p in self.players if p.is_alive]
@@ -324,7 +340,6 @@ class BunkerGame(GameEngine):
 
         # Обновляем тему
         cat = self.state.shared_data["catastrophe"]
-        # Простая логика получения темы (можно улучшить)
         idx = (self.state.round - 1) % len(cat["topics"])
         new_topic = cat["topics"][idx]
         self.state.shared_data["topic"] = f"Раунд {self.state.round}: {new_topic}"
@@ -333,7 +348,7 @@ class BunkerGame(GameEngine):
         events.append(GameEvent(type="switch_turn"))
 
         return events
-
+    
     def get_player_view(self, viewer_id: int) -> str:
         # Для LLM пока не используется напрямую, так как BotAgent формирует это сам
         return ""

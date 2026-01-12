@@ -18,18 +18,21 @@ class BotAgent:
         attrs = bot.attributes
         gameplay = bunker_cfg.gameplay
 
-        # 1. Формируем контекст (что бот видит)
+        # --- ФИКС 1: Фильтруем мертвых из контекста ---
+        # Бот не должен видеть мертвых в списке "Выжившие", чтобы не обращаться к ним
+        alive_players = [p for p in all_players if p.is_alive]
+
         public_info_str = BunkerUtils.generate_dashboard(
             state.shared_data.get("topic", ""),
             state.round,
             state.phase,
-            all_players
+            alive_players  # <-- Передаем только живых
         )
 
-        # 2. История
+        # Формируем историю
         history_text = "\n".join(state.history[-10:])
 
-        # 3. Анализ угроз (кого атаковать)
+        # Анализ угроз (кого атаковать)
         target_instruction = ""
         if state.phase in ["discussion", "runoff"]:
             best_target, max_threat, reasons = self._find_best_target(bot, all_players)
@@ -40,7 +43,6 @@ class BotAgent:
                     f"Цель: {best_target.name}. Причины: {reasons_text}."
                 )
 
-        # 4. Сборка промпта
         template = bunker_cfg.prompts["bot_player"]["system"]
         full_prompt = template.format(
             name=bot.name,
@@ -50,7 +52,7 @@ class BotAgent:
             topic=state.shared_data.get("topic"),
             phase=state.phase,
             public_profiles=public_info_str,
-            my_last_speech="...",  # Упростили для краткости
+            my_last_speech="...",
             memory=history_text,
             target_instruction=target_instruction,
             attack_threshold=gameplay["bots"]["thresholds"]["attack"],
@@ -61,7 +63,6 @@ class BotAgent:
         if director_instruction:
             full_prompt += f"\n!!! ПРИКАЗ РЕЖИССЕРА: {director_instruction} !!!"
 
-        # 5. Выбор модели (берем случайную из конфига моделей)
         bot_models = core_cfg.models["player_models"]
         model = random.choice(bot_models)
 
@@ -80,8 +81,10 @@ class BotAgent:
 
     async def make_vote(self, bot: BasePlayer, candidates: List[BasePlayer], state: BaseGameState, logger=None) -> str:
         valid_targets = [p for p in candidates if p.name != bot.name and p.is_alive]
+        if not valid_targets:
+            return ""  # Не за кого голосовать
 
-        # Расчет весов для голосования
+        # Расчет весов
         scored_targets = []
         threat_text = ""
         for target in valid_targets:
@@ -90,10 +93,8 @@ class BotAgent:
             reasons_str = ", ".join(reasons) if reasons else "Чист"
             threat_text += f"- {target.name}: Угроза {int(score)} ({reasons_str})\n"
 
-        # Если есть явный враг, голосуем по логике, иначе спрашиваем LLM
         scored_targets.sort(key=lambda x: x[1], reverse=True)
 
-        # Промпт для голосования
         template = bunker_cfg.prompts["bot_player"]["voting_user"]
         prompt = template.format(
             name=bot.name,
@@ -115,16 +116,31 @@ class BotAgent:
         )
 
         data = llm_client.parse_json(response)
-        vote = data.get("vote")
+        raw_vote = data.get("vote", "").strip()
 
-        # Fallback
-        if vote not in [p.name for p in valid_targets]:
+        # --- ФИКС 2: Жесткая валидация имени ---
+        # LLM может вернуть "Bob." или " Bob" или "Bob (Doctor)".
+        # Мы ищем точное совпадение среди валидных целей.
+
+        final_vote = ""
+        # 1. Точное совпадение
+        if raw_vote in [p.name for p in valid_targets]:
+            final_vote = raw_vote
+        else:
+            # 2. Поиск подстроки (если бот написал "Bob (Врач)")
+            for t in valid_targets:
+                if t.name in raw_vote:
+                    final_vote = t.name
+                    break
+
+        # 3. Fallback (если бред, голосуем за врага №1 или случайно)
+        if not final_vote:
             if scored_targets:
-                vote = scored_targets[0][0].name
+                final_vote = scored_targets[0][0].name
             else:
-                vote = random.choice([p.name for p in valid_targets]) if valid_targets else ""
+                final_vote = random.choice([p.name for p in valid_targets])
 
-        return vote
+        return final_vote
 
     def _find_best_target(self, me: BasePlayer, others: List[BasePlayer]):
         best_target = None
@@ -142,9 +158,7 @@ class BotAgent:
     def _calculate_threat(self, me: BasePlayer, target: BasePlayer):
         score = 0
         reasons = []
-        # Достаем множители страхов из personality
         my_mults = me.attributes.get("personality", {}).get("multipliers", {})
-
         target_factors = target.attributes.get("active_factors", {})
 
         for factor, weight in target_factors.items():

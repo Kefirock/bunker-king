@@ -10,9 +10,11 @@ try:
 except ImportError:
     Cerebras = None
 
-from src.config import cfg
+# Используем новый конфиг ядра
+from src.core.config import core_cfg
 
 load_dotenv(os.path.join("Configs", ".env"))
+
 
 class LLMService:
     def __init__(self):
@@ -41,11 +43,13 @@ class LLMService:
 
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+            # Авто-добавление инструкции JSON, если её нет
             if not any("json" in (m.get("content") or "").lower() for m in messages):
+                sys_msg = {"role": "system", "content": "ОТВЕТЬ СТРОГО В JSON."}
                 if messages and messages[0].get("role") == "system":
-                    messages[0]["content"] = (messages[0].get("content") or "") + " ОТВЕТЬ СТРОГО В JSON."
+                    messages[0]["content"] += " ОТВЕТЬ СТРОГО В JSON."
                 else:
-                    messages.insert(0, {"role": "system", "content": "ОТВЕТЬ СТРОГО В JSON."})
+                    messages.insert(0, sys_msg)
 
         response_content = ""
         try:
@@ -58,7 +62,6 @@ class LLMService:
                 if not self.cerebras_client: raise ValueError("Cerebras API Key missing")
                 completion = self.cerebras_client.chat.completions.create(**kwargs)
                 response_content = completion.choices[0].message.content
-
             else:
                 response_content = "Error: Unknown provider"
 
@@ -66,29 +69,20 @@ class LLMService:
             logging.error(f"LLM Error ({provider}): {e}")
             response_content = "{}" if json_mode else "Error generating response."
 
-        if response_content is None:
-            response_content = "{}" if json_mode else ""
-
-        # Логируем в переданный логгер
         if logger:
-            logger.log_llm_interaction(
-                service_name="LLMService",
-                model_id=model_id,
-                prompt=messages,
-                response=response_content,
-                is_json_mode=json_mode
-            )
+            logger.log_llm(model_id, messages, response_content)
 
-        return response_content
+        return response_content if response_content else ("{}" if json_mode else "")
 
     @staticmethod
     def parse_json(text: Optional[str]) -> Dict[str, Any]:
-        if not text:
-            return {}
+        if not text: return {}
         clean_text = text.replace("```json", "").replace("```", "").strip()
         try:
             return json.loads(clean_text)
-        except json.JSONDecodeError:
+        except:
             return {}
 
-llm = LLMService()
+
+# Инстанс сервиса
+llm_client = LLMService()

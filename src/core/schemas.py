@@ -4,40 +4,32 @@ from typing import List, Dict, Any, Optional, Union
 
 class GameEvent(BaseModel):
     """
-    Событие, которое Игра возвращает Ядру, чтобы то отправило сообщение.
+    Событие, которое Игра возвращает Ядру.
     """
-    type: str  # "message", "update_dashboard", "game_over", "switch_turn"
-    target_ids: List[Union[int, str]] = []  # Кому отправлять (пустой список = всем)
+    type: str  # "message", "edit_message", "update_dashboard", "game_over", "switch_turn", "callback_answer"
+    target_ids: List[Union[int, str]] = []  # Кому отправлять (пустой список = всем в лобби)
+
     content: str = ""
-    reply_markup: Optional[Any] = None  # Для клавиатур
+    reply_markup: Optional[Any] = None
     extra_data: Dict[str, Any] = {}
+
+    # НОВОЕ ПОЛЕ: Уникальная метка сообщения (например "turn_bot_1")
+    # Если указано, main.py запомнит ID сообщения под этим именем.
+    token: Optional[str] = None
 
 
 class BasePlayer(BaseModel):
-    """
-    Универсальный игрок.
-    В attributes лежит всё специфичное: {"role": "Mafia"} или {"profession": "Doctor"}
-    """
-    id: int  # user_id или отрицательный для бота
+    id: int
     name: str
     is_human: bool = False
     is_alive: bool = True
-
-    # Словарь для хранения специфики конкретной игры
     attributes: Dict[str, Any] = Field(default_factory=dict)
-
-    # "Память" игрока (что он знает/видит)
     memory: List[str] = Field(default_factory=list)
 
 
 class BaseGameState(BaseModel):
-    """
-    Универсальное состояние.
-    """
     game_id: str
     round: int = 1
-    phase: str = "init"  # Например: "day", "night", "discussion"
+    phase: str = "init"
     history: List[str] = Field(default_factory=list)
-
-    # Общее хранилище данных игры
     shared_data: Dict[str, Any] = Field(default_factory=dict)

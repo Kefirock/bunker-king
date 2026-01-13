@@ -9,8 +9,7 @@ target_config = "/app/src/games/bunker/config.py"
 if os.path.exists(target_config):
     try:
         with open(target_config, "r", encoding="utf-8") as f:
-            content = f.read()
-            print(f"📄 Content of {target_config}:\n{'-' * 20}\n{content}\n{'-' * 20}")
+            pass  # Просто проверяем чтение
     except Exception as e:
         print(f"⚠️ Could not read file: {e}")
 else:
@@ -26,21 +25,12 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
 from aiohttp import web
 
-# Импорты ядра
 from src.core.schemas import GameEvent
 
-# Импорт игры с отловом ошибок
 try:
     from src.games.bunker.game import BunkerGame
 except ImportError as e:
     print(f"🔥 CRITICAL IMPORT ERROR: {e}")
-    # Пытаемся импортировать конфиг напрямую, чтобы увидеть детали
-    try:
-        import src.games.bunker.config
-
-        print(f"DEBUG: Config dir contents: {dir(src.games.bunker.config)}")
-    except Exception as ex:
-        print(f"DEBUG: Even direct config import failed: {ex}")
     sys.exit(1)
 
 load_dotenv(os.path.join("Configs", ".env"))
@@ -59,8 +49,12 @@ dp.include_router(router)
 active_games = {}
 dashboard_map = {}
 
+# НОВОЕ: Хранилище токенов сообщений
+# Ключ: f"{chat_id}:{token}" -> Значение: message_id
+message_tokens = {}
 
-# === DUMMY SERVER ДЛЯ KOYEB ===
+
+# === WEB SERVER ===
 async def health_check(request):
     return web.Response(text="Bot is alive")
 
@@ -76,7 +70,7 @@ async def start_web_server():
     print(f"🌍 Web server started on port {port}")
 
 
-# === ЛОГИКА БОТА ===
+# === ОБРАБОТЧИК СОБЫТИЙ ===
 
 async def process_game_events(chat_id: int, events: list[GameEvent]):
     if not events: return
@@ -85,8 +79,11 @@ async def process_game_events(chat_id: int, events: list[GameEvent]):
 
     for event in events:
         try:
+            # 1. ОТПРАВКА НОВОГО СООБЩЕНИЯ
             if event.type == "message":
                 targets = event.target_ids if event.target_ids else [chat_id]
+
+                # Собираем клавиатуру
                 kb = None
                 if event.reply_markup:
                     builder = InlineKeyboardBuilder()
@@ -96,8 +93,11 @@ async def process_game_events(chat_id: int, events: list[GameEvent]):
                     kb = builder.as_markup()
 
                 for tid in targets:
-                    if isinstance(tid, int) and tid < 0: continue
+                    if isinstance(tid, int) and tid < 0: continue  # Пропуск ботов
+
                     sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
+
+                    # Логика Дашборда
                     if event.extra_data.get("is_dashboard"):
                         dashboard_map[game.lobby_id] = sent_msg.message_id
                         try:
@@ -105,6 +105,32 @@ async def process_game_events(chat_id: int, events: list[GameEvent]):
                         except:
                             pass
 
+                    # НОВОЕ: Запоминаем токен, если он есть
+                    if event.token:
+                        token_key = f"{tid}:{event.token}"
+                        message_tokens[token_key] = sent_msg.message_id
+
+            # 2. НОВОЕ: РЕДАКТИРОВАНИЕ СООБЩЕНИЯ ПО ТОКЕНУ
+            elif event.type == "edit_message":
+                targets = event.target_ids if event.target_ids else [chat_id]
+
+                for tid in targets:
+                    if isinstance(tid, int) and tid < 0: continue
+
+                    # Ищем ID сообщения по токену
+                    token_key = f"{tid}:{event.token}"
+                    msg_id = message_tokens.get(token_key)
+
+                    if msg_id:
+                        try:
+                            await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
+                        except Exception as ex:
+                            logging.warning(f"Failed to edit message {msg_id}: {ex}")
+                    else:
+                        # Если не нашли (или удалено), шлем новое
+                        await bot.send_message(chat_id=tid, text=event.content)
+
+            # 3. ОБНОВЛЕНИЕ ДАШБОРДА
             elif event.type == "update_dashboard":
                 msg_id = dashboard_map.get(game.lobby_id)
                 if msg_id:
@@ -113,25 +139,31 @@ async def process_game_events(chat_id: int, events: list[GameEvent]):
                     except:
                         pass
 
+            # 4. ОТВЕТ НА CALLBACK
             elif event.type == "callback_answer":
                 if event.target_ids:
+                    # Важно: query_id приходит в extra_data
                     await bot.answer_callback_query(callback_query_id=event.extra_data.get("query_id"),
                                                     text=event.content)
 
+            # 5. КОНЕЦ ИГРЫ
             elif event.type == "game_over":
                 await bot.send_message(chat_id, f"🏁 <b>GAME OVER</b>\n{event.content}")
                 if chat_id in active_games:
                     del active_games[chat_id]
                 return
 
+            # 6. ПЕРЕДАЧА ХОДА
             elif event.type == "switch_turn":
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)  # Небольшая пауза
                 new_events = await game.process_turn()
                 await process_game_events(chat_id, new_events)
 
         except Exception as e:
             logging.error(f"Event Error ({event.type}): {e}")
 
+
+# === HANDLERS ===
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -144,17 +176,24 @@ async def cmd_start(message: Message):
 async def start_bunker_handler(callback: CallbackQuery):
     user = callback.from_user
     chat_id = callback.message.chat.id
+
+    # Создаем игру
     game = BunkerGame(lobby_id=str(chat_id))
     active_games[chat_id] = game
     await callback.message.edit_text("🚀 Запуск симуляции...")
 
+    # Инициализация
     events = game.init_game([{"id": user.id, "name": user.first_name}])
+
+    # Помечаем дашборд
     for e in events:
         if e.type == "update_dashboard":
             e.type = "message"
             e.extra_data["is_dashboard"] = True
 
     await process_game_events(chat_id, events)
+
+    # Первый ход
     turn_events = await game.process_turn()
     await process_game_events(chat_id, turn_events)
 
@@ -164,6 +203,8 @@ async def chat_message_handler(message: Message):
     chat_id = message.chat.id
     game = active_games.get(chat_id)
     if not game: return
+
+    # Передаем сообщение игрока
     events = await game.process_message(player_id=message.from_user.id, text=message.text)
     await process_game_events(chat_id, events)
 
@@ -173,6 +214,7 @@ async def game_action_handler(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     game = active_games.get(chat_id)
     if not game: return
+
     events = await game.handle_action(player_id=callback.from_user.id, action_data=callback.data)
     if events:
         events[0].extra_data["query_id"] = callback.id

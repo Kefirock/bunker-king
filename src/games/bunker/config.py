@@ -1,40 +1,58 @@
-import os
 import yaml
+import os
 import sys
-from src.core.config import core_cfg
+from typing import Dict, Any
 
 
-class BunkerConfig:
+class CoreConfig:
     def __init__(self):
-        # Берем путь, который уже нашло ядро
-        self.base_dir = core_cfg.config_dir
+        # --- DEBUG БЛОК ---
+        print("🔍 DEBUG: FILE SYSTEM CHECK")
+        try:
+            cwd = os.getcwd()
+            print(f"📂 Current Working Dir: {cwd}")
+            print(f"📄 Files in {cwd}: {os.listdir(cwd)}")
 
-        self.gameplay = self._load("gameplay.yaml")
-        self.scenarios = self._load("scenarios.yaml")
-        self.prompts = self._load("prompts.yaml")
+            # Если есть папка src, глянем внутрь
+            if os.path.exists("src"):
+                print(f"📄 Files in src: {os.listdir('src')}")
 
-        # Проверка, что файл загрузился корректно
-        if not self.gameplay or "judge" not in self.gameplay:
-            print(f"🔥 CRITICAL ERROR: 'gameplay.yaml' failed to load correctly from {self.base_dir}")
-            # Пытаемся вывести содержимое для отладки
-            print(f"   Content: {self.gameplay}")
+            # Проверка регистра (Linux чувствителен!)
+            configs_candidates = [f for f in os.listdir(cwd) if f.lower() == "configs"]
+            if configs_candidates:
+                print(f"👀 Found similar folders: {configs_candidates}")
+        except Exception as e:
+            print(f"⚠️ Debug error: {e}")
+        # ------------------
+
+        self.config_dir = self._find_config_path()
+        if not os.path.exists(self.config_dir):
+            # Если конфигов нет, нет смысла продолжать - выходим.
+            print("🔥 CRITICAL: Configs not found. Exiting.")
             sys.exit(1)
 
-        self.judge_weights = self.gameplay["judge"]["weights"]
+        self.models = self.load_yaml("models.yaml")
 
-    def _load(self, filename: str):
-        path = os.path.join(self.base_dir, filename)
+    def _find_config_path(self) -> str:
+        candidates = [
+            os.path.join(os.getcwd(), "Configs"),
+            "/app/Configs",
+            "Configs"
+        ]
+        for path in candidates:
+            if os.path.exists(path) and os.path.isdir(path):
+                print(f"✅ Configs found at: {path}")
+                return path
+        return ""
+
+    def load_yaml(self, filename: str) -> Dict[str, Any]:
+        path = os.path.join(self.config_dir, filename)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"❌ BunkerConfig Error loading {path}: {e}")
+            print(f"❌ Error loading {filename}: {e}")
             return {}
 
-    def get_visibility(self, round_num: int):
-        if not self.gameplay: return {}
-        r_key = f"round_{min(round_num, 3)}"
-        return self.gameplay.get("visibility", {}).get(r_key, {})
 
-
-bunker_cfg = BunkerConfig()
+core_cfg = CoreConfig()

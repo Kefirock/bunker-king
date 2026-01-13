@@ -18,31 +18,46 @@ class BotAgent:
         attrs = bot.attributes
         gameplay = bunker_cfg.gameplay
 
-        # --- ФИКС 1: Фильтруем мертвых из контекста ---
-        # Бот не должен видеть мертвых в списке "Выжившие", чтобы не обращаться к ним
-        alive_players = [p for p in all_players if p.is_alive]
+        # 1. УМНЫЙ КОНТЕКСТ (Кого мы видим?)
+        # Формируем список с пометками для LLM
+        players_desc_list = []
+        for p in all_players:
+            status_tags = []
+            if not p.is_alive: status_tags.append("DEAD")
 
-        public_info_str = BunkerUtils.generate_dashboard(
-            state.shared_data.get("topic", ""),
-            state.round,
-            state.phase,
-            alive_players  # <-- Передаем только живых
-        )
+            # Если игрок жив, показываем его данные
+            if p.is_alive:
+                if p.attributes.get("status") == "LIAR": status_tags.append("LIAR")
+                if p.attributes.get("status") == "SUSPICIOUS": status_tags.append("SUSPICIOUS")
 
-        # Формируем историю
-        history_text = "\n".join(state.history[-10:])
+                vis_rules = bunker_cfg.get_visibility(state.round)
+                prof = p.attributes.get('profession', '???')
+                trait = p.attributes.get('trait', '???') if vis_rules.get('show_trait') else "???"
 
-        # Анализ угроз (кого атаковать)
-        target_instruction = ""
-        if state.phase in ["discussion", "runoff"]:
-            best_target, max_threat, reasons = self._find_best_target(bot, all_players)
-            if best_target and max_threat > 0:
-                reasons_text = ", ".join(reasons)
-                target_instruction = (
-                    f"\n>>> АНАЛИЗ УГРОЗ <<<\n"
-                    f"Цель: {best_target.name}. Причины: {reasons_text}."
-                )
+                tags_str = f"[{', '.join(status_tags)}]" if status_tags else ""
+                players_desc_list.append(f"- {p.name}: {prof}, {trait} {tags_str}")
+            else:
+                # Мертвых показываем кратко, чтобы бот знал, что они выбыли
+                players_desc_list.append(f"- {p.name}: [ELIMINATED/DEAD]")
 
+        public_info_str = "\n".join(players_desc_list)
+
+        # 2. ОПРЕДЕЛЕНИЕ ЗАДАЧИ (Что говорить?)
+        phase_task = "Speak naturally."
+        if state.phase == "presentation":
+            if state.round == 1:
+                phase_task = "TASK: Introduce yourself, state your profession. Prove you are useful. Be brief."
+            elif state.round == 2:
+                phase_task = "TASK: Reveal your TRAIT. Explain why it is not a problem or how it helps."
+            else:
+                phase_task = "TASK: Propose a solution to the catastrophe problem based on your skills."
+        elif state.phase == "discussion":
+            phase_task = "TASK: Debate phase. Attack suspicious players, defend yourself, or build alliances. Do NOT introduce yourself again."
+        elif state.phase == "runoff":
+            opponent = next((n for n in state.shared_data["runoff_candidates"] if n != bot.name), "opponent")
+            phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go. Be aggressive."
+
+        # 3. СБОРКА ПРОМПТА
         template = bunker_cfg.prompts["bot_player"]["system"]
         full_prompt = template.format(
             name=bot.name,
@@ -53,15 +68,18 @@ class BotAgent:
             phase=state.phase,
             public_profiles=public_info_str,
             my_last_speech="...",
-            memory=history_text,
-            target_instruction=target_instruction,
+            memory="\n".join(state.history[-10:]),
+            target_instruction="",
             attack_threshold=gameplay["bots"]["thresholds"]["attack"],
             min_words=gameplay["bots"]["word_limits"]["min"],
             max_words=gameplay["bots"]["word_limits"]["max"]
         )
 
+        # Добавляем жесткую инструкцию фазы в конец, чтобы она имела приоритет
+        full_prompt += f"\n\nCURRENT OBJECTIVE: {phase_task}"
+
         if director_instruction:
-            full_prompt += f"\n!!! ПРИКАЗ РЕЖИССЕРА: {director_instruction} !!!"
+            full_prompt += f"\n!!! DIRECTOR ORDER: {director_instruction} !!!"
 
         bot_models = core_cfg.models["player_models"]
         model = random.choice(bot_models)
@@ -70,7 +88,7 @@ class BotAgent:
             model_config=model,
             messages=[
                 {"role": "system", "content": full_prompt},
-                {"role": "user", "content": "Твой ход."}
+                {"role": "user", "content": f"Topic: {state.shared_data.get('topic')}. Action!"}
             ],
             json_mode=True,
             logger=logger
@@ -81,17 +99,25 @@ class BotAgent:
 
     async def make_vote(self, bot: BasePlayer, candidates: List[BasePlayer], state: BaseGameState, logger=None) -> str:
         valid_targets = [p for p in candidates if p.name != bot.name and p.is_alive]
-        if not valid_targets:
-            return ""  # Не за кого голосовать
+        if not valid_targets: return ""
 
-        # Расчет весов
+        # Авто-голос в дуэли (если всего 1 враг)
+        if len(valid_targets) == 1:
+            return valid_targets[0].name
+
+        # Расчет угроз
         scored_targets = []
         threat_text = ""
         for target in valid_targets:
             score, reasons = self._calculate_threat(bot, target)
+            # Бонус к угрозе, если Лжец
+            if target.attributes.get("status") == "LIAR":
+                score += 50
+                reasons.append("LIAR")
+
             scored_targets.append((target, score))
-            reasons_str = ", ".join(reasons) if reasons else "Чист"
-            threat_text += f"- {target.name}: Угроза {int(score)} ({reasons_str})\n"
+            reasons_str = ", ".join(reasons) if reasons else "Clean"
+            threat_text += f"- {target.name}: Threat {int(score)} ({reasons_str})\n"
 
         scored_targets.sort(key=lambda x: x[1], reverse=True)
 
@@ -118,27 +144,17 @@ class BotAgent:
         data = llm_client.parse_json(response)
         raw_vote = data.get("vote", "").strip()
 
-        # --- ФИКС 2: Жесткая валидация имени ---
-        # LLM может вернуть "Bob." или " Bob" или "Bob (Doctor)".
-        # Мы ищем точное совпадение среди валидных целей.
-
         final_vote = ""
-        # 1. Точное совпадение
         if raw_vote in [p.name for p in valid_targets]:
             final_vote = raw_vote
         else:
-            # 2. Поиск подстроки (если бот написал "Bob (Врач)")
             for t in valid_targets:
                 if t.name in raw_vote:
                     final_vote = t.name
                     break
 
-        # 3. Fallback (если бред, голосуем за врага №1 или случайно)
         if not final_vote:
-            if scored_targets:
-                final_vote = scored_targets[0][0].name
-            else:
-                final_vote = random.choice([p.name for p in valid_targets])
+            final_vote = scored_targets[0][0].name if scored_targets else random.choice([p.name for p in valid_targets])
 
         return final_vote
 

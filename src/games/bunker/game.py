@@ -7,7 +7,6 @@ from src.core.abstract_game import GameEngine
 from src.core.schemas import BasePlayer, BaseGameState, GameEvent
 from src.core.logger import SessionLogger
 
-# Импорты
 from src.games.bunker.config import bunker_cfg
 from src.games.bunker.utils import BunkerUtils
 from src.games.bunker.logic.bot_agent import BotAgent
@@ -31,14 +30,16 @@ class BunkerGame(GameEngine):
         self.players = BunkerUtils.generate_initial_players(users_data)
 
         catastrophe = random.choice(bunker_cfg.scenarios["catastrophes"])
-        topic = catastrophe["topics"][0]
+
+        # Генерируем тему для 1 раунда
+        topic = self._get_topic(1, catastrophe)
 
         self.state = BaseGameState(
             game_id=self.lobby_id,
             round=1,
             phase="presentation",
             shared_data={
-                "topic": f"{catastrophe['name']}: {topic}",
+                "topic": topic,
                 "catastrophe": catastrophe,
                 "runoff_candidates": [],
                 "runoff_count": 0
@@ -65,100 +66,87 @@ class BunkerGame(GameEngine):
         events.append(GameEvent(type="message", content="☢️ <b>ИГРА НАЧАЛАСЬ!</b>"))
         return events
 
+    # --- ЭТАП 1: ОБЪЯВЛЕНИЕ ХОДА ---
     async def process_turn(self) -> List[GameEvent]:
         events = []
 
-        # 1. Определяем список активных игроков (только живые)
         alive_players = [p for p in self.players if p.is_alive]
-
-        # Если перестрелка - только кандидаты
         if self.state.phase == "runoff":
             candidates = self.state.shared_data["runoff_candidates"]
             active_list = [p for p in alive_players if p.name in candidates]
         else:
             active_list = alive_players
 
-        # 2. Проверка: Если круг закончился -> следующая фаза
         if self.current_turn_index >= len(active_list):
             return await self._next_phase()
 
         current_player = active_list[self.current_turn_index]
 
-        # 3. Ход ЧЕЛОВЕКА
+        # ХОД ЧЕЛОВЕКА
         if current_player.is_human:
-            # Личное уведомление
-            msg = f"👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат."
+            msg = f"👉 <b>ВАШ ХОД!</b>\nТема: {self.state.shared_data['topic']}"
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
-
-            # Уведомление остальным
-            others_ids = [p.id for p in self.players if p.id != current_player.id]
-            if others_ids:
-                events.append(GameEvent(type="message",
-                                        target_ids=others_ids,
-                                        content=f"⏳ Ходит <b>{current_player.name}</b>..."))
+            others = [p.id for p in self.players if p.id != current_player.id]
+            if others:
+                events.append(
+                    GameEvent(type="message", target_ids=others, content=f"⏳ Ходит <b>{current_player.name}</b>..."))
             return events
 
-        # 4. Ход БОТА
+        # ХОД БОТА
         else:
-            # Генерируем уникальный токен для этого сообщения
             msg_token = f"turn_{self.state.round}_{self.state.phase}_{self.current_turn_index}"
-
-            # А. Отправляем "Печатает..." с токеном
             events.append(GameEvent(
                 type="message",
                 content=f"⏳ <b>{current_player.name}</b> печатает...",
                 token=msg_token
             ))
-
-            # Б. Генерируем ответ (это займет время)
-            # Примечание: main.py отправит первое сообщение, а потом вызовет switch_turn,
-            # но здесь мы делаем всё в одном вызове process_turn, поэтому задержка будет тут.
-            # Чтобы визуально это выглядело красиво, мы вернем events СЕЙЧАС,
-            # но нам нужно как-то вызвать генерацию ПОТОМ.
-            # В текущей архитектуре мы просто подождем тут (асинхронно).
-
-            instr = await self.director_agent.get_hidden_instruction(
-                current_player, self.players, self.state, logger=self.logger
-            )
-
-            speech = await self.bot_agent.make_turn(
-                current_player, self.players, self.state, instr, logger=self.logger
-            )
-
-            await self.judge_agent.analyze_move(
-                current_player, speech, self.state.shared_data["topic"], logger=self.logger
-            )
-
-            self.state.history.append(f"[{current_player.name}]: {speech}")
-
-            display_name = BunkerUtils.get_display_name(current_player, self.state.round)
-            final_msg = f"{display_name}:\n{speech}"
-
-            # В. Редактируем сообщение по токену
             events.append(GameEvent(
-                type="edit_message",
-                content=final_msg,
-                token=msg_token
+                type="bot_think",
+                token=msg_token,
+                extra_data={"bot_id": current_player.id}
             ))
-
-            # Г. Передаем ход
-            self.current_turn_index += 1
-            events.append(GameEvent(type="switch_turn"))
-
             return events
+
+    # --- ЭТАП 2: ВЫПОЛНЕНИЕ ХОДА ---
+    async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
+        await asyncio.sleep(2.0)
+        bot = next((p for p in self.players if p.id == bot_id), None)
+        if not bot: return []
+
+        events = []
+        instr = await self.director_agent.get_hidden_instruction(
+            bot, self.players, self.state, logger=self.logger
+        )
+        speech = await self.bot_agent.make_turn(
+            bot, self.players, self.state, instr, logger=self.logger
+        )
+        await self.judge_agent.analyze_move(
+            bot, speech, self.state.shared_data["topic"], logger=self.logger
+        )
+
+        self.state.history.append(f"[{bot.name}]: {speech}")
+
+        # Отображение статуса (если пойман на лжи)
+        status_icon = ""
+        if bot.attributes.get("status") == "LIAR": status_icon = " [🤥 ЛЖЕЦ]"
+
+        display_name = BunkerUtils.get_display_name(bot, self.state.round)
+        final_msg = f"{display_name}{status_icon}:\n{speech}"
+
+        events.append(GameEvent(type="edit_message", content=final_msg, token=token))
+
+        self.current_turn_index += 1
+        events.append(GameEvent(type="switch_turn"))
+        return events
 
     async def process_message(self, player_id: int, text: str) -> List[GameEvent]:
         events = []
-
-        # Найти игрока
         player = next((p for p in self.players if p.id == player_id), None)
         if not player or not player.is_alive: return []
 
-        # Если сейчас фаза голосования - игнорируем текст (или пишем варнинг)
         if self.state.phase == "voting":
-            return [GameEvent(type="message", target_ids=[player_id], content="🤫 Сейчас идет голосование!")]
+            return [GameEvent(type="message", target_ids=[player_id], content="🤫 Идет голосование!")]
 
-        # Проверка очередности (Строгий режим)
         alive_players = [p for p in self.players if p.is_alive]
         if self.state.phase == "runoff":
             candidates = self.state.shared_data["runoff_candidates"]
@@ -166,38 +154,26 @@ class BunkerGame(GameEngine):
         else:
             active_list = alive_players
 
-        # Кто должен ходить сейчас?
         if self.current_turn_index < len(active_list):
-            expected_player = active_list[self.current_turn_index]
-            if expected_player.id != player_id:
-                # Если пишет не тот, чья очередь -> просто игнорируем или шлем варнинг
-                # (В старой версии было свободное общение в Discussion, но ты просил строгий порядок)
-                return [GameEvent(type="message", target_ids=[player_id],
-                                  content=f"⚠️ Сейчас очередь игрока {expected_player.name}!")]
+            expected = active_list[self.current_turn_index]
+            if expected.id != player_id:
+                return [
+                    GameEvent(type="message", target_ids=[player_id], content=f"⚠️ Сейчас очередь {expected.name}!")]
         else:
-            # Если индекс вышел за пределы (странная ситуация), просто выходим
             return []
 
-        # Логика обработки
         self.state.history.append(f"[{player.name}]: {text}")
-        await self.judge_agent.analyze_move(
-            player, text, self.state.shared_data["topic"], logger=self.logger
-        )
+        await self.judge_agent.analyze_move(player, text, self.state.shared_data["topic"], logger=self.logger)
 
-        # Рассылка всем, КРОМЕ автора (Фикс Эха)
         display_name = BunkerUtils.get_display_name(player, self.state.round)
         msg = f"{display_name}:\n{text}"
 
-        targets = [p.id for p in self.players if p.id != player_id]
-        if targets:
-            events.append(GameEvent(type="message", target_ids=targets, content=msg))
+        others = [p.id for p in self.players if p.id != player_id]
+        if others:
+            events.append(GameEvent(type="message", target_ids=others, content=msg))
 
-        # Сдвигаем ход
         self.current_turn_index += 1
-
-        # Автоматически дергаем switch_turn, чтобы проверить, не пора ли менять фазу
         events.append(GameEvent(type="switch_turn"))
-
         return events
 
     async def handle_action(self, player_id: int, action_data: str) -> List[GameEvent]:
@@ -208,15 +184,17 @@ class BunkerGame(GameEngine):
         player = next((p for p in self.players if p.id == player_id), None)
         if not player: return []
 
-        # Записываем голос
+        # Проверка: уже голосовал?
+        if player.name in self.votes:
+            return [GameEvent(type="callback_answer", target_ids=[player_id], content="Вы уже голосовали")]
+
         self.votes[player.name] = target_name
 
-        # Подтверждение (исчезающее или редактируемое)
         events = [
-            GameEvent(type="callback_answer", target_ids=[player_id], content=f"Голос принят: {target_name}")
+            GameEvent(type="callback_answer", target_ids=[player_id], content=f"Голос принят: {target_name}"),
+            GameEvent(type="message", target_ids=[player_id], content=f"Вы -> <b>{target_name}</b>")
         ]
 
-        # Проверка: все ли живые проголосовали?
         alive_count = sum(1 for p in self.players if p.is_alive)
         if len(self.votes) >= alive_count:
             res_events = await self._finish_voting()
@@ -225,6 +203,20 @@ class BunkerGame(GameEngine):
         return events
 
     # --- Внутренние методы ---
+
+    def _get_topic(self, round_num: int, catastrophe: dict) -> str:
+        """Определяет тему раунда по правилам"""
+        topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
+
+        if round_num == 1:
+            return topics_cfg[1]  # Профессия
+        elif round_num == 2:
+            return topics_cfg[2].format(trait="Твоя черта")  # Черта
+        else:
+            # С 3 раунда - проблемы катастрофы
+            idx = (round_num - 3) % len(catastrophe["topics"])
+            problem = catastrophe["topics"][idx]
+            return topics_cfg[3].format(catastrophe_problem=problem)
 
     async def _next_phase(self) -> List[GameEvent]:
         events = []
@@ -236,8 +228,8 @@ class BunkerGame(GameEngine):
             dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
                                                   [p for p in self.players if p.is_alive])
             events.append(GameEvent(type="update_dashboard", content=dash))
-            events.append(GameEvent(type="message",
-                                    content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nАргументируйте, почему вы должны остаться."))
+            events.append(
+                GameEvent(type="message", content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nКритика, споры и поиск слабого звена."))
             events.append(GameEvent(type="switch_turn"))
 
         elif self.state.phase in ["discussion", "runoff"]:
@@ -255,30 +247,48 @@ class BunkerGame(GameEngine):
                                               [p for p in self.players if p.is_alive])
         events.append(GameEvent(type="update_dashboard", content=dash))
 
-        targets = []
+        # Определяем список целей
+        candidates = []
         if self.state.shared_data["runoff_candidates"]:
-            targets = [p for p in self.players if p.name in self.state.shared_data["runoff_candidates"]]
+            candidates = [p for p in self.players if p.name in self.state.shared_data["runoff_candidates"]]
         else:
-            targets = [p for p in self.players if p.is_alive]
+            candidates = [p for p in self.players if p.is_alive]
 
-        keyboard_data = []
-        for t in targets:
-            # Кнопка: "☠ Имя" -> callback "vote_Имя"
-            keyboard_data.append({"text": f"☠ {t.name}", "callback_data": f"vote_{t.name}"})
+        # 1. ЛОГИКА ДЛЯ ЛЮДЕЙ (Персональные клавиатуры)
+        for p in self.players:
+            if p.is_human and p.is_alive:
+                # Фильтр: нельзя голосовать за себя
+                my_targets = [t for t in candidates if t.name != p.name]
 
-        events.append(GameEvent(
-            type="message",
-            content="🛑 <b>ГОЛОСОВАНИЕ</b>\nВыберите, кто покинет бункер.",
-            reply_markup=keyboard_data
-        ))
+                # АВТО-ГОЛОСОВАНИЕ (если остался 1 вариант, например в дуэли)
+                if len(my_targets) == 1:
+                    target = my_targets[0]
+                    self.votes[p.name] = target.name
+                    events.append(GameEvent(
+                        type="message",
+                        target_ids=[p.id],
+                        content=f"⚖️ Дуэль: Ваш голос автоматически уходит против <b>{target.name}</b>"
+                    ))
+                else:
+                    # Рисуем клавиатуру
+                    keyboard_data = []
+                    for t in my_targets:
+                        keyboard_data.append({"text": f"☠ {t.name}", "callback_data": f"vote_{t.name}"})
 
-        # Боты голосуют сразу
+                    events.append(GameEvent(
+                        type="message",
+                        target_ids=[p.id],
+                        content="🛑 <b>ГОЛОСОВАНИЕ</b>\nКого изгнать?",
+                        reply_markup=keyboard_data
+                    ))
+
+        # 2. ЛОГИКА ДЛЯ БОТОВ (Голосуют сразу)
         for p in self.players:
             if not p.is_human and p.is_alive:
-                vote = await self.bot_agent.make_vote(p, targets, self.state, logger=self.logger)
+                vote = await self.bot_agent.make_vote(p, candidates, self.state, logger=self.logger)
                 self.votes[p.name] = vote
 
-        # Если одни боты, завершаем сразу
+        # Если все проголосовали (например, одни боты или авто-голоса), завершаем
         alive_count = sum(1 for p in self.players if p.is_alive)
         if len(self.votes) >= alive_count:
             events.extend(await self._finish_voting())
@@ -287,12 +297,10 @@ class BunkerGame(GameEngine):
 
     async def _finish_voting(self) -> List[GameEvent]:
         events = []
-        if not self.votes:
-            return [GameEvent(type="message", content="Ошибка голосования.")]
+        if not self.votes: return [GameEvent(type="message", content="Нет голосов.")]
 
         counts = Counter(self.votes.values())
         results = counts.most_common()
-
         leader_name, leader_votes = results[0]
         leaders = [name for name, count in results if count == leader_votes]
 
@@ -350,13 +358,12 @@ class BunkerGame(GameEngine):
         self.votes.clear()
 
         cat = self.state.shared_data["catastrophe"]
-        idx = (self.state.round - 1) % len(cat["topics"])
-        new_topic = cat["topics"][idx]
+        # Генерируем тему для нового раунда
+        new_topic = self._get_topic(self.state.round, cat)
         self.state.shared_data["topic"] = f"Раунд {self.state.round}: {new_topic}"
 
         events.append(GameEvent(type="message", content=f"🔥 <b>РАУНД {self.state.round}</b>\nТема: {new_topic}"))
         events.append(GameEvent(type="switch_turn"))
-
         return events
 
     def get_player_view(self, viewer_id: int) -> str:

@@ -1,35 +1,31 @@
-# Используем полную версию Python (не slim!), чтобы избежать проблем с DNS и системными библиотеками
+# Используем полный Python 3.11, как вы и просили
 FROM python:3.11
 
-# Создаем пользователя с ID 1000 (требование безопасности Hugging Face Spaces)
-RUN useradd -m -u 1000 user
-
-# Переключаемся на пользователя
-USER user
-
-# Добавляем путь к локальным пакетам пользователя
-ENV PATH="/home/user/.local/bin:$PATH"
-# Отключаем буферизацию логов (видим ошибки сразу)
+# Переменные окружения:
+# PYTHONDONTWRITEBYTECODE - не создавать .pyc файлы
+# PYTHONUNBUFFERED - сразу выводить логи в консоль (важно для дебага!)
+ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Рабочая папка
+# Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем зависимости с правами пользователя
-COPY --chown=user requirements.txt requirements.txt
+# Сначала копируем только requirements.txt для кэширования слоев
+COPY requirements.txt .
 
 # Устанавливаем зависимости
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Копируем код проекта с правами пользователя
-COPY --chown=user . .
+# Копируем ВЕСЬ проект в контейнер
+# (.) - текущая папка на компьютере -> (.) - папка /app в контейнере
+COPY . .
 
-# Создаем папку для логов
+# Создаем папку для логов, чтобы избежать ошибок при старте
 RUN mkdir -p Logs
 
-# Порт, который ожидает Hugging Face
-ENV PORT=7860
+# Koyeb и другие облака часто используют порт 8000
+ENV PORT=8000
 
-# Запуск
+# Запускаем бота
 CMD ["python", "main.py"]

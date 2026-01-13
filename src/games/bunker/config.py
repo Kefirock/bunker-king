@@ -3,27 +3,27 @@ import yaml
 import sys
 from src.core.config import core_cfg
 
+print("🛠 Loading module: src.games.bunker.config...")
+
 
 class BunkerConfig:
     def __init__(self):
-        # Используем путь, который уже нашло Ядро (core_cfg)
-        # Это гарантирует, что мы смотрим в ту же папку /app/Configs
+        # Используем путь, который уже нашло Ядро
         self.base_dir = core_cfg.config_dir
 
-        print(f"🤖 BunkerConfig loading from: {self.base_dir}")
+        print(f"📂 BunkerConfig base_dir: {self.base_dir}")
 
         self.gameplay = self._load("gameplay.yaml")
         self.scenarios = self._load("scenarios.yaml")
         self.prompts = self._load("prompts.yaml")
 
-        # Защита: Если конфиг не загрузился - останавливаемся
-        if not self.gameplay or "judge" not in self.gameplay:
-            print(f"🔥 CRITICAL ERROR: 'gameplay.yaml' failed to load or is empty.")
-            # Пытаемся показать, что не так
-            print(f"   Contents of gameplay: {self.gameplay}")
+        # Проверка на пустоту
+        if not self.gameplay:
+            print("🔥 FATAL: gameplay.yaml is empty or failed to load!")
             sys.exit(1)
 
-        self.judge_weights = self.gameplay["judge"]["weights"]
+        # Безопасное получение весов (get вместо [])
+        self.judge_weights = self.gameplay.get("judge", {}).get("weights", {})
 
     def _load(self, filename: str):
         path = os.path.join(self.base_dir, filename)
@@ -43,10 +43,8 @@ class BunkerConfig:
         return self.gameplay.get("visibility", {}).get(r_key, {})
 
 
-# === ВОТ ЭТА СТРОЧКА САМАЯ ВАЖНАЯ ===
-# Без нее другие файлы не могут импортировать 'bunker_cfg'
-try:
-    bunker_cfg = BunkerConfig()
-except Exception as e:
-    print(f"🔥 FATAL ERROR initializing BunkerConfig: {e}")
-    sys.exit(1)
+# Создаем экземпляр БЕЗ try-except.
+# Если тут ошибка - пусть бот упадет и покажет Traceback.
+print("⚙️ Instantiating BunkerConfig...")
+bunker_cfg = BunkerConfig()
+print("✅ BunkerConfig instantiated successfully.")

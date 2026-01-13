@@ -3,6 +3,20 @@ import logging
 import os
 import sys
 
+# --- ДИАГНОСТИЧЕСКИЙ БЛОК ---
+print("🔍 DEBUG: INSPECTING SERVER FILES")
+target_config = "/app/src/games/bunker/config.py"
+if os.path.exists(target_config):
+    try:
+        with open(target_config, "r", encoding="utf-8") as f:
+            content = f.read()
+            print(f"📄 Content of {target_config}:\n{'-' * 20}\n{content}\n{'-' * 20}")
+    except Exception as e:
+        print(f"⚠️ Could not read file: {e}")
+else:
+    print(f"❌ File {target_config} NOT FOUND!")
+# ----------------------------
+
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
@@ -10,11 +24,24 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
-from aiohttp import web  # <--- ВАЖНО: Веб-сервер
+from aiohttp import web
 
-# Импорты ядра и игр
+# Импорты ядра
 from src.core.schemas import GameEvent
-from src.games.bunker.game import BunkerGame
+
+# Импорт игры с отловом ошибок
+try:
+    from src.games.bunker.game import BunkerGame
+except ImportError as e:
+    print(f"🔥 CRITICAL IMPORT ERROR: {e}")
+    # Пытаемся импортировать конфиг напрямую, чтобы увидеть детали
+    try:
+        import src.games.bunker.config
+
+        print(f"DEBUG: Config dir contents: {dir(src.games.bunker.config)}")
+    except Exception as ex:
+        print(f"DEBUG: Even direct config import failed: {ex}")
+    sys.exit(1)
 
 load_dotenv(os.path.join("Configs", ".env"))
 
@@ -24,7 +51,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     sys.exit("Error: BOT_TOKEN is missing")
 
-# Инициализация
 bot = Bot(token=BOT_TOKEN, session=AiohttpSession(), default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 router = Router()
@@ -34,7 +60,7 @@ active_games = {}
 dashboard_map = {}
 
 
-# === DUMMY SERVER ДЛЯ KOYEB (ОБЯЗАТЕЛЬНО) ===
+# === DUMMY SERVER ДЛЯ KOYEB ===
 async def health_check(request):
     return web.Response(text="Bot is alive")
 
@@ -44,8 +70,6 @@ async def start_web_server():
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-
-    # Порт 8000 обязателен для Koyeb
     port = int(os.getenv("PORT", 8000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -156,9 +180,7 @@ async def game_action_handler(callback: CallbackQuery):
 
 
 async def main():
-    # Запускаем веб-сервер ПЕРЕД ботом
     await start_web_server()
-
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         print("✅ Core System Online. Waiting for players...")

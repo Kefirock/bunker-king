@@ -30,8 +30,6 @@ class BunkerGame(GameEngine):
         self.players = BunkerUtils.generate_initial_players(users_data)
 
         catastrophe = random.choice(bunker_cfg.scenarios["catastrophes"])
-
-        # Генерируем тему для 1 раунда
         topic = self._get_topic(1, catastrophe)
 
         self.state = BaseGameState(
@@ -109,24 +107,32 @@ class BunkerGame(GameEngine):
 
     # --- ЭТАП 2: ВЫПОЛНЕНИЕ ХОДА ---
     async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
-        await asyncio.sleep(2.0)
+        # УБРАЛИ sleep(2.0), так как LLM и так думает время.
+        # Это ускорит реакцию на 2 секунды.
+
         bot = next((p for p in self.players if p.id == bot_id), None)
         if not bot: return []
 
         events = []
+
+        # 1. Режиссер (Быстрый чек)
         instr = await self.director_agent.get_hidden_instruction(
             bot, self.players, self.state, logger=self.logger
         )
+
+        # 2. Бот (Генерация речи - самое долгое)
         speech = await self.bot_agent.make_turn(
             bot, self.players, self.state, instr, logger=self.logger
         )
+
+        # 3. Судья (Анализ)
+        # Судья работает ПОСЛЕ генерации речи, поэтому пользователь уже ждет 2 шага.
         await self.judge_agent.analyze_move(
             bot, speech, self.state.shared_data["topic"], logger=self.logger
         )
 
         self.state.history.append(f"[{bot.name}]: {speech}")
 
-        # Отображение статуса (если пойман на лжи)
         status_icon = ""
         if bot.attributes.get("status") == "LIAR": status_icon = " [🤥 ЛЖЕЦ]"
 
@@ -184,7 +190,6 @@ class BunkerGame(GameEngine):
         player = next((p for p in self.players if p.id == player_id), None)
         if not player: return []
 
-        # Проверка: уже голосовал?
         if player.name in self.votes:
             return [GameEvent(type="callback_answer", target_ids=[player_id], content="Вы уже голосовали")]
 
@@ -205,15 +210,12 @@ class BunkerGame(GameEngine):
     # --- Внутренние методы ---
 
     def _get_topic(self, round_num: int, catastrophe: dict) -> str:
-        """Определяет тему раунда по правилам"""
         topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
-
         if round_num == 1:
-            return topics_cfg[1]  # Профессия
+            return topics_cfg[1]
         elif round_num == 2:
-            return topics_cfg[2].format(trait="Твоя черта")  # Черта
+            return topics_cfg[2].format(trait="Твоя черта")
         else:
-            # С 3 раунда - проблемы катастрофы
             idx = (round_num - 3) % len(catastrophe["topics"])
             problem = catastrophe["topics"][idx]
             return topics_cfg[3].format(catastrophe_problem=problem)
@@ -247,20 +249,17 @@ class BunkerGame(GameEngine):
                                               [p for p in self.players if p.is_alive])
         events.append(GameEvent(type="update_dashboard", content=dash))
 
-        # Определяем список целей
         candidates = []
         if self.state.shared_data["runoff_candidates"]:
             candidates = [p for p in self.players if p.name in self.state.shared_data["runoff_candidates"]]
         else:
             candidates = [p for p in self.players if p.is_alive]
 
-        # 1. ЛОГИКА ДЛЯ ЛЮДЕЙ (Персональные клавиатуры)
+        # ЛЮДИ
         for p in self.players:
             if p.is_human and p.is_alive:
-                # Фильтр: нельзя голосовать за себя
                 my_targets = [t for t in candidates if t.name != p.name]
 
-                # АВТО-ГОЛОСОВАНИЕ (если остался 1 вариант, например в дуэли)
                 if len(my_targets) == 1:
                     target = my_targets[0]
                     self.votes[p.name] = target.name
@@ -270,7 +269,6 @@ class BunkerGame(GameEngine):
                         content=f"⚖️ Дуэль: Ваш голос автоматически уходит против <b>{target.name}</b>"
                     ))
                 else:
-                    # Рисуем клавиатуру
                     keyboard_data = []
                     for t in my_targets:
                         keyboard_data.append({"text": f"☠ {t.name}", "callback_data": f"vote_{t.name}"})
@@ -282,13 +280,12 @@ class BunkerGame(GameEngine):
                         reply_markup=keyboard_data
                     ))
 
-        # 2. ЛОГИКА ДЛЯ БОТОВ (Голосуют сразу)
+        # БОТЫ
         for p in self.players:
             if not p.is_human and p.is_alive:
                 vote = await self.bot_agent.make_vote(p, candidates, self.state, logger=self.logger)
                 self.votes[p.name] = vote
 
-        # Если все проголосовали (например, одни боты или авто-голоса), завершаем
         alive_count = sum(1 for p in self.players if p.is_alive)
         if len(self.votes) >= alive_count:
             events.extend(await self._finish_voting())
@@ -309,7 +306,6 @@ class BunkerGame(GameEngine):
             res_text += f"{name}: {cnt}\n"
         events.append(GameEvent(type="message", content=res_text))
 
-        # НИЧЬЯ
         if len(leaders) > 1:
             if self.state.shared_data["runoff_count"] >= 1:
                 events.append(GameEvent(type="game_over", content="Ничья дважды. Бункер закрыт."))
@@ -324,7 +320,6 @@ class BunkerGame(GameEngine):
             events.append(GameEvent(type="switch_turn"))
             return events
 
-        # ИЗГНАНИЕ
         eliminated = None
         for p in self.players:
             if p.name.strip() == leader_name.strip():
@@ -335,7 +330,6 @@ class BunkerGame(GameEngine):
             eliminated.is_alive = False
             events.append(GameEvent(type="message", content=f"🚪 <b>{eliminated.name}</b> был изгнан."))
 
-        # ПРОВЕРКА ПОБЕДЫ
         survivors = [p for p in self.players if p.is_alive]
         humans_alive = any(p.is_human for p in survivors)
         target_survivors = bunker_cfg.gameplay["rounds"]["target_survivors"]
@@ -349,7 +343,6 @@ class BunkerGame(GameEngine):
                                     content=f"🎉 <b>ПОБЕДА!</b> Выжили: {', '.join([p.name for p in survivors])}"))
             return events
 
-        # СЛЕДУЮЩИЙ РАУНД
         self.state.round += 1
         self.state.phase = "presentation"
         self.state.shared_data["runoff_candidates"] = []
@@ -358,7 +351,6 @@ class BunkerGame(GameEngine):
         self.votes.clear()
 
         cat = self.state.shared_data["catastrophe"]
-        # Генерируем тему для нового раунда
         new_topic = self._get_topic(self.state.round, cat)
         self.state.shared_data["topic"] = f"Раунд {self.state.round}: {new_topic}"
 

@@ -8,8 +8,7 @@ class BunkerUtils:
     @staticmethod
     def generate_initial_players(user_data: List[Dict]) -> List[BasePlayer]:
         """
-        Создает список BasePlayer, заполняя attributes спецификой Бункера.
-        user_data: список [{"id": 123, "name": "User"}, ...]
+        user_data: список только живых людей [{'id': 123, 'name': 'Bob'}]
         """
         scenarios = bunker_cfg.scenarios
         profs = scenarios["professions"][:]
@@ -17,42 +16,46 @@ class BunkerUtils:
         names = scenarios["bot_names"][:]
         personalities = scenarios.get("personalities", [])
 
+        # Берем настройки из конфига (по умолчанию 6 игроков)
+        target_total = bunker_cfg.gameplay.get("setup", {}).get("total_players", 6)
+
         random.shuffle(profs)
         random.shuffle(traits)
         random.shuffle(names)
 
         players = []
 
-        # 1. Создаем Людей
+        # 1. Создаем ЛЮДЕЙ
         for u in user_data:
+            p_name = u["name"]
             prof = profs.pop() if profs else "Выживший"
             trait = traits.pop() if traits else "Счастливчик"
 
-            # Атрибуты специфичные для Бункера
             attrs = {
                 "profession": prof,
                 "trait": trait,
                 "health": 100,
-                "status": "NORMAL",  # NORMAL, SUSPICIOUS, LIAR
-                "active_factors": {},  # Для Судьи (накопленные грехи)
+                "status": "NORMAL",
+                "active_factors": {},
+                # Люди играют сами за себя, у них нет Personality-множителей страха
                 "personality": {"id": "human", "description": "Живой Игрок"}
             }
 
             p = BasePlayer(
                 id=u["id"],
-                name=u["name"],
+                name=p_name,
                 is_human=True,
                 attributes=attrs
             )
             players.append(p)
 
-        # 2. Создаем Ботов (добиваем до нужного количества)
-        target_total = bunker_cfg.gameplay.get("setup", {}).get("total_players", 5)
+        # 2. Авто-заполнение БОТАМИ
+        # Если пришло 2 человека, а надо 6 -> создаем 4 бота
         bots_needed = max(0, target_total - len(players))
 
         for i in range(bots_needed):
-            bot_name = names.pop() if names else f"Bot-{i + 1}"
-            prof = profs.pop() if profs else "Выживший"
+            bot_name = names.pop() if names else f"CPU-{i + 1}"
+            prof = profs.pop() if profs else "Бродяга"
             trait = traits.pop() if traits else "Обычный"
             pers_data = random.choice(personalities)
 
@@ -62,11 +65,14 @@ class BunkerUtils:
                 "health": 100,
                 "status": "NORMAL",
                 "active_factors": {},
-                "personality": pers_data  # Содержит description и multipliers
+                "personality": pers_data
             }
 
+            # Генерируем безопасный ID для бота
+            fake_id = -(2000 + i)
+
             p = BasePlayer(
-                id=-(i + 100),  # Отрицательный ID для ботов
+                id=fake_id,
                 name=bot_name,
                 is_human=False,
                 attributes=attrs
@@ -78,9 +84,6 @@ class BunkerUtils:
 
     @staticmethod
     def get_display_name(p: BasePlayer, round_num: int, reveal_all: bool = False) -> str:
-        """
-        Генерирует строку "Bob - Врач, [Скрыто]" на основе правил видимости.
-        """
         vis_rules = bunker_cfg.get_visibility(round_num)
         attrs = p.attributes
 
@@ -88,8 +91,10 @@ class BunkerUtils:
         trait = attrs.get("trait", "???")
         status_marker = " 💀" if not p.is_alive else ""
 
-        if reveal_all:
-            return f"<b>{p.name}</b> - {prof}, {trait}{status_marker}"
+        if not p.is_alive or reveal_all:
+            role_info = ""
+            if attrs.get("status") == "LIAR": role_info = " [ЛЖЕЦ]"
+            return f"<b>{p.name}</b> - {prof}, {trait}{role_info}{status_marker}"
 
         trait_part = f", {trait}" if vis_rules.get("show_trait", False) else ""
         return f"<b>{p.name}</b> - {prof}{trait_part}{status_marker}"
@@ -100,8 +105,16 @@ class BunkerUtils:
         for p in players:
             list_str += f"- {BunkerUtils.get_display_name(p, round_num)}\n"
 
+        phase_map = {
+            "presentation": "ПРЕДСТАВЛЕНИЕ",
+            "discussion": "ОБСУЖДЕНИЕ",
+            "voting": "ГОЛОСОВАНИЕ",
+            "runoff": "ПЕРЕСТРЕЛКА"
+        }
+        phase_ru = phase_map.get(phase, phase)
+
         return (
-            f"🔔 <b>РАУНД {round_num}</b> | ФАЗА: {phase}\n"
+            f"🔔 <b>РАУНД {round_num}</b> | {phase_ru}\n"
             f"<blockquote>{topic}</blockquote>\n\n"
             f"👥 <b>ВЫЖИВШИЕ:</b>\n{list_str}"
         )

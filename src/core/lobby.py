@@ -1,5 +1,6 @@
 import random
 import string
+import time
 from typing import Dict, List, Optional
 
 
@@ -7,31 +8,36 @@ class Lobby:
     def __init__(self, lobby_id: str, host_id: int, host_name: str):
         self.lobby_id = lobby_id
         self.host_id = host_id
-        self.status = "waiting"  # "waiting", "playing"
+        self.status = "waiting"
         self.game_type = "bunker"
 
-        # UI: Где находится сообщение меню
-        self.menu_message_id: Optional[int] = None
-        self.chat_id: int = 0
+        # Тайм-аут: время последнего действия
+        self.last_activity = time.time()
 
-        # Список участников: {user_id: {name, id}}
+        # UI: Храним ID сообщения меню для КАЖДОГО игрока
+        # {user_id: message_id}
+        self.user_interfaces: Dict[int, int] = {}
+
         self.players: Dict[int, dict] = {}
 
-        # Сразу добавляем хоста
+        # Добавляем хоста
         self.add_player(host_id, host_name)
 
     def add_player(self, user_id: int, name: str):
-        """Добавляет только реальных людей"""
-        if user_id in self.players:
-            return
-        self.players[user_id] = {
-            "id": user_id,
-            "name": name
-        }
+        if user_id in self.players: return
+        self.players[user_id] = {"id": user_id, "name": name}
+        self.touch()  # Обновляем таймер активности
 
     def remove_player(self, user_id: int):
         if user_id in self.players:
             del self.players[user_id]
+        if user_id in self.user_interfaces:
+            del self.user_interfaces[user_id]
+        self.touch()
+
+    def touch(self):
+        """Сброс таймера авто-удаления"""
+        self.last_activity = time.time()
 
     def get_players_list_text(self) -> str:
         lines = []
@@ -47,7 +53,6 @@ class Lobby:
 class LobbyManager:
     def __init__(self):
         self.lobbies: Dict[str, Lobby] = {}
-        # user_id -> lobby_id
         self.user_to_lobby: Dict[int, str] = {}
 
     def create_lobby(self, host_id: int, host_name: str) -> Lobby:
@@ -61,7 +66,6 @@ class LobbyManager:
         return self.lobbies.get(lobby_id)
 
     def get_all_waiting(self) -> List[Lobby]:
-        """Возвращает список лобби, готовых к игре"""
         return [l for l in self.lobbies.values() if l.status == "waiting"]
 
     def join_lobby(self, lobby_id: str, user_id: int, user_name: str) -> bool:
@@ -80,7 +84,6 @@ class LobbyManager:
         lobby = self.get_lobby(lid)
         if lobby:
             lobby.remove_player(user_id)
-            # Если вышел хост или пусто - удаляем
             if user_id == lobby.host_id or len(lobby.players) == 0:
                 self.delete_lobby(lid)
 

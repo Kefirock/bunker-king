@@ -2,10 +2,10 @@ import asyncio
 import logging
 import os
 import sys
+import random
+import time
 
-# --- ДИАГНОСТИКА ---
 print("🔍 DEBUG: SERVER STARTUP")
-# -------------------
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, Router, F
@@ -14,6 +14,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiohttp import web
 
 from src.core.schemas import GameEvent
@@ -36,18 +37,13 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# active_games: { lobby_id : GameEngine }
 active_games = {}
-
-# dashboard_map: { lobby_id : { user_id : message_id } }
-# Храним ID сообщения-закрепа для каждого игрока в каждом лобби
 dashboard_map = {}
-
-# message_tokens: { chat_id:token : message_id }
 message_tokens = {}
 
 
-# === WEB SERVER ===
+# === WEB SERVER & BACKGROUND TASKS ===
+
 async def health_check(request): return web.Response(text="Bot is alive")
 
 
@@ -62,11 +58,39 @@ async def start_web_server():
     print(f"🌍 Web server started on port {port}")
 
 
-# === UI HELPERS ===
+async def cleanup_lobbies_task():
+    """Фоновая задача: удаляет лобби, где нет активности 5 минут"""
+    while True:
+        await asyncio.sleep(60)  # Проверка раз в минуту
+        try:
+            now = time.time()
+            # Копируем ключи, так как будем удалять
+            for lid, lobby in list(lobby_manager.lobbies.items()):
+                if lobby.status == "waiting" and (now - lobby.last_activity > 300):  # 300 сек = 5 мин
+                    logging.info(f"♻️ Cleaning up inactive lobby {lid}")
 
-async def update_lobby_ui(chat_id: int, message_id: int, lobby: Lobby):
-    """Рисует меню лобби"""
-    # Считаем, сколько ботов добавится
+                    # Оповещаем и удаляем
+                    for uid, msg_id in lobby.user_interfaces.items():
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=uid,
+                                message_id=msg_id,
+                                text="⌛ <b>Время истекло.</b> Лобби закрыто из-за неактивности.",
+                                reply_markup=None
+                            )
+                        except:
+                            pass
+
+                    lobby_manager.delete_lobby(lid)
+        except Exception as e:
+            logging.error(f"Cleanup error: {e}")
+
+
+# === UI HELPERS (SYNCHRONOUS) ===
+
+async def broadcast_lobby_ui(lobby: Lobby):
+    """Обновляет интерфейс у ВСЕХ участников лобби"""
+    # Текст меню
     from src.games.bunker.config import bunker_cfg
     total_needed = bunker_cfg.gameplay.get("setup", {}).get("total_players", 6)
     current_humans = len(lobby.players)
@@ -81,39 +105,64 @@ async def update_lobby_ui(chat_id: int, message_id: int, lobby: Lobby):
         f"<i>...ещё {bots_will_be_added} мест займет ИИ</i>"
     )
 
-    kb = InlineKeyboardBuilder()
+    # Клавиатура
+    # (Для хоста - с управлением, для остальных - только выход)
+    # Но так как мы не можем делать разные клавиатуры в одном вызове,
+    # мы будем генерировать их внутри цикла.
 
-    # Кнопку старта видит только хост, но отрисовываем всем (API телеграма не дает скрыть для одного)
-    # В хендлере стоит проверка прав.
-    kb.add(InlineKeyboardButton(text="🚀 СТАРТ", callback_data=f"lobby_start_{lobby.lobby_id}"))
-    kb.add(InlineKeyboardButton(text="🚪 Выйти", callback_data="lobby_leave"))
-    kb.adjust(1)
+    dead_users = []
 
-    try:
-        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=kb.as_markup())
-    except Exception:
-        pass
+    for user_id, message_id in lobby.user_interfaces.items():
+        kb = InlineKeyboardBuilder()
+
+        # Если это Хост
+        if user_id == lobby.host_id:
+            kb.add(InlineKeyboardButton(text="🚀 СТАРТ", callback_data=f"lobby_start_{lobby.lobby_id}"))
+            kb.add(InlineKeyboardButton(text="🚪 Закрыть лобби", callback_data="lobby_leave"))
+            kb.adjust(1)
+        else:
+            kb.add(InlineKeyboardButton(text="🚪 Выйти", callback_data="lobby_leave"))
+
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=kb.as_markup()
+            )
+        except TelegramForbiddenError:
+            # Бот заблокирован пользователем -> удаляем юзера
+            dead_users.append(user_id)
+        except TelegramBadRequest as e:
+            # Сообщение не найдено или не изменилось
+            if "message is not modified" not in str(e):
+                # Если сообщение удалено пользователем -> тоже считаем выходом?
+                # Пока нет, просто игнорируем.
+                pass
+        except Exception as e:
+            logging.warning(f"Failed update lobby UI for {user_id}: {e}")
+
+    # Удаляем "мертвых душ"
+    if dead_users:
+        for uid in dead_users:
+            lobby_manager.leave_lobby(uid)
+        # Если кто-то отвалился, рекурсивно обновляем список для оставшихся
+        # (но с защитой от бесконечной рекурсии)
+        if len(lobby.players) > 0:
+            asyncio.create_task(broadcast_lobby_ui(lobby))
 
 
 # === EVENT PROCESSOR ===
 
 async def process_game_events(context_id: str, events: list[GameEvent]):
-    """
-    context_id: lobby_id (строка)
-    """
     if not events: return
-
-    # Находим игру
     game = active_games.get(context_id)
     if not game: return
 
     for event in events:
         try:
-            # 1. SEND MESSAGE
             if event.type == "message":
-                # Если target_ids пуст -> шлем ВСЕМ ЛЮДЯМ в игре
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
-
                 kb = None
                 if event.reply_markup:
                     builder = InlineKeyboardBuilder()
@@ -124,35 +173,23 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
                 for tid in targets:
                     if isinstance(tid, int) and tid < 0: continue
-
                     sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
-                    # Логика Дашборда (Закрепа)
                     if event.extra_data.get("is_dashboard"):
-                        # Инициализируем словарь для лобби
-                        if game.lobby_id not in dashboard_map:
-                            dashboard_map[game.lobby_id] = {}
-
-                        # Запоминаем ID сообщения для конкретного юзера
+                        if game.lobby_id not in dashboard_map: dashboard_map[game.lobby_id] = {}
                         dashboard_map[game.lobby_id][tid] = sent_msg.message_id
-
                         try:
                             await bot.pin_chat_message(chat_id=tid, message_id=sent_msg.message_id)
                         except:
                             pass
 
                     if event.token:
-                        token_key = f"{tid}:{event.token}"
-                        message_tokens[token_key] = sent_msg.message_id
+                        message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
 
-            # 2. EDIT MESSAGE
             elif event.type == "edit_message":
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 for tid in targets:
-                    if isinstance(tid, int) and tid < 0: continue
-                    token_key = f"{tid}:{event.token}"
-                    msg_id = message_tokens.get(token_key)
-
+                    msg_id = message_tokens.get(f"{tid}:{event.token}")
                     if msg_id:
                         try:
                             await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
@@ -161,18 +198,14 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     else:
                         await bot.send_message(chat_id=tid, text=event.content)
 
-            # 3. UPDATE DASHBOARD (Синхронно у всех)
             elif event.type == "update_dashboard":
                 if game.lobby_id in dashboard_map:
-                    # Проходимся по всем, у кого записан ID дашборда
-                    user_map = dashboard_map[game.lobby_id]
-                    for uid, msg_id in user_map.items():
+                    for uid, msg_id in dashboard_map[game.lobby_id].items():
                         try:
                             await bot.edit_message_text(chat_id=uid, message_id=msg_id, text=event.content)
                         except:
                             pass
 
-            # 4. CALLBACK / GAME OVER / SWITCH / THINK
             elif event.type == "callback_answer":
                 if event.target_ids:
                     await bot.answer_callback_query(callback_query_id=event.extra_data.get("query_id"),
@@ -183,11 +216,8 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                 for tid in targets:
                     await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
 
-                # Чистим память
                 if game.lobby_id in active_games: del active_games[game.lobby_id]
                 if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
-
-                # Удаляем лобби из менеджера, чтобы игроки могли создать новое
                 lobby_manager.delete_lobby(game.lobby_id)
                 return
 
@@ -209,7 +239,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
     args = command.args
-    # Deep link join
     if args and args.startswith("join_"):
         lobby_id = args.split("_")[1]
         await join_lobby_logic(message, lobby_id)
@@ -219,7 +248,7 @@ async def cmd_start(message: Message, command: CommandObject):
     kb.add(InlineKeyboardButton(text="☢️ Соло", callback_data="start_bunker_solo"))
     kb.add(InlineKeyboardButton(text="🆕 Создать", callback_data="lobby_create"))
     kb.add(InlineKeyboardButton(text="🔍 Найти", callback_data="lobby_list"))
-    kb.adjust(1, 2)  # Кнопка Соло большая, остальные в ряд
+    kb.adjust(1, 2)
 
     await message.answer("<b>🎮 B U N K E R</b>\nВыберите режим:", reply_markup=kb.as_markup())
 
@@ -229,20 +258,13 @@ async def cmd_start(message: Message, command: CommandObject):
 async def start_bunker_handler(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     user = callback.from_user
-
-    # Для соло используем ID чата как ID лобби
     lid = str(chat_id)
     game = BunkerGame(lobby_id=lid)
     active_games[lid] = game
 
-    # Регистрируем "фейковое" лобби в менеджере, чтобы роутинг сообщений работал
-    # (даже в соло мы идем через lobby_manager)
-    lobby_manager.create_lobby(user.id, user.first_name)
-    # Но так как create_lobby генерит рандомный ID, нам надо его подменить или использовать
-    # Упростим: Соло игра работает БЕЗ lobby_manager, но роутинг проверяет active_games напрямую по chat_id
+    lobby_manager.leave_lobby(user.id)  # Чистим старое
 
     await callback.message.edit_text("🚀 Запуск симуляции...")
-
     events = game.init_game([{"id": user.id, "name": user.first_name}])
     for e in events:
         if e.type == "update_dashboard":
@@ -259,13 +281,15 @@ async def start_bunker_handler(callback: CallbackQuery):
 @router.callback_query(F.data == "lobby_create")
 async def lobby_create_handler(callback: CallbackQuery):
     user = callback.from_user
-    # Если игрок уже где-то есть, выкидываем его
     lobby_manager.leave_lobby(user.id)
 
     lobby = lobby_manager.create_lobby(user.id, user.first_name)
-    lobby.chat_id = callback.message.chat.id
-    lobby.menu_message_id = callback.message.message_id
-    await update_lobby_ui(lobby.chat_id, lobby.menu_message_id, lobby)
+
+    # Запоминаем сообщение интерфейса
+    lobby.user_interfaces[user.id] = callback.message.message_id
+
+    # Обновляем UI (это отрисует меню лобби)
+    await broadcast_lobby_ui(lobby)
 
 
 @router.callback_query(F.data == "lobby_list")
@@ -277,9 +301,7 @@ async def lobby_list_handler(callback: CallbackQuery):
         kb.add(InlineKeyboardButton(text="Нет активных комнат 🤷‍♂️", callback_data="dummy"))
     else:
         for l in lobbies:
-            # "🚪 ABCD | Alex (1/6)"
             count = len(l.players)
-            # Достаем имя хоста
             host_name = l.players[l.host_id]['name']
             btn_text = f"🚪 {l.lobby_id} | {host_name} ({count})"
             kb.add(InlineKeyboardButton(text=btn_text, callback_data=f"lobby_join_{l.lobby_id}"))
@@ -304,26 +326,29 @@ async def lobby_join_btn_handler(callback: CallbackQuery):
 
 async def join_lobby_logic(message: Message, lobby_id: str):
     user = message.from_user
-    # Сначала выходим из старых
-    lobby_manager.leave_lobby(user.id)
+    lobby_manager.leave_lobby(user.id)  # Выходим из текущих
 
     success = lobby_manager.join_lobby(lobby_id, user.id, user.first_name)
     if success:
         lobby = lobby_manager.get_lobby(lobby_id)
 
-        # Обновляем UI у того, кто присоединился
-        # (или отправляем новое сообщение, если это deep link)
-        await message.answer(f"✅ Вход в лобби <b>{lobby_id}</b> выполнен.")
+        # ВАЖНО: Мы не шлем новое сообщение, мы редактируем ТЕКУЩЕЕ сообщение с кнопкой
+        # (если это callback) или шлем новое (если это deeplink).
 
-        # Обновляем UI у ХОСТА (и всех, кто видит старое меню)
-        if lobby.menu_message_id and lobby.chat_id:
-            await update_lobby_ui(lobby.chat_id, lobby.menu_message_id, lobby)
+        if isinstance(message, Message) and not message.from_user.is_bot:
+            # Это Deeplink, шлем новое
+            msg = await message.answer("Подключение...")
+            lobby.user_interfaces[user.id] = msg.message_id
+        else:
+            # Это кнопка, ID сообщения уже есть в контексте callback (но тут message - это объект Message)
+            # В aiogram message при callback - это message, к которому привязана кнопка.
+            lobby.user_interfaces[user.id] = message.message_id
 
-        # Оповещаем остальных (опционально)
-        # for pid in lobby.players:
-        #     if pid != user.id: await bot.send_message(pid, f"➕ {user.first_name}")
+        # Обновляем UI у ВСЕХ (включая нового)
+        await broadcast_lobby_ui(lobby)
 
     else:
+        # Если не нашли - пишем ошибку (но лучше edit, если это callback)
         await message.answer("❌ Лобби не найдено или игра уже идет.")
 
 
@@ -333,16 +358,16 @@ async def lobby_leave_handler(callback: CallbackQuery):
     lobby = lobby_manager.leave_lobby(user_id)
 
     if lobby:
-        if lobby.host_id == user_id:
-            await callback.message.edit_text("🚫 Вы распустили лобби.")
-            # В идеале надо оповестить остальных, что лобби закрыто
-        else:
-            await callback.answer("Вы вышли.")
-            await callback.message.edit_text("Вы покинули лобби.")
-            # Обновляем UI для оставшихся
-            await update_lobby_ui(lobby.chat_id, lobby.menu_message_id, lobby)
+        # Если вышли - возвращаем в главное меню
+        await cmd_start(callback.message, CommandObject())
+
+        # Если лобби еще живо (не хост вышел), обновляем остальных
+        # Если лобби умерло (хост вышел), broadcast не нужен, оно удалено
+        current_lobby = lobby_manager.get_lobby(lobby.lobby_id)
+        if current_lobby:
+            await broadcast_lobby_ui(current_lobby)
     else:
-        await callback.message.edit_text("Лобби нет.")
+        await callback.message.edit_text("Лобби больше нет.")
         await cmd_start(callback.message, CommandObject())
 
 
@@ -354,30 +379,25 @@ async def lobby_start_handler(callback: CallbackQuery):
     lobby = lobby_manager.get_lobby(lobby_id)
     if not lobby: return
 
-    # Проверка прав
     if callback.from_user.id != lobby.host_id:
         await callback.answer("Ждите лидера!", show_alert=True)
         return
 
     lobby.status = "playing"
+    await callback.message.edit_text(f"🚀 <b>ИГРА ЗАПУЩЕНА!</b>")
 
-    # Создаем игру
     game = BunkerGame(lobby_id=lobby_id)
     active_games[lobby_id] = game
 
-    # Берем людей и запускаем. Боты добавятся внутри init_game.
     users_data = lobby.to_game_users_list()
     events = game.init_game(users_data)
 
-    # Помечаем дашборд
     for e in events:
         if e.type == "update_dashboard":
             e.type = "message"
             e.extra_data["is_dashboard"] = True
 
-    # В мультиплеере важно: рассылаем всем
     await process_game_events(lobby_id, events)
-
     turn_events = await game.process_turn()
     await process_game_events(lobby_id, turn_events)
 
@@ -387,37 +407,37 @@ async def lobby_start_handler(callback: CallbackQuery):
 @router.message()
 async def chat_message_handler(message: Message):
     chat_id = message.chat.id
-
-    # 1. Поиск игры
     game = None
-
-    # A. Проверяем Соло (ключ = chat_id)
     if str(chat_id) in active_games:
         game = active_games[str(chat_id)]
     else:
-        # B. Проверяем Мульти (через lobby_manager)
         lid = lobby_manager.user_to_lobby.get(chat_id)
         if lid: game = active_games.get(lid)
 
     if not game: return
 
+    # Обновляем активность лобби, чтобы не удалилось
+    lobby = lobby_manager.get_lobby(game.lobby_id)
+    if lobby: lobby.touch()
+
     events = await game.process_message(player_id=message.from_user.id, text=message.text)
-    # Передаем ID лобби, чтобы движок знал контекст
     await process_game_events(game.lobby_id, events)
 
 
 @router.callback_query(F.data.startswith("vote_"))
 async def game_action_handler(callback: CallbackQuery):
     chat_id = callback.message.chat.id
-
     game = None
     if str(chat_id) in active_games:
         game = active_games[str(chat_id)]
     else:
         lid = lobby_manager.user_to_lobby.get(chat_id)
         if lid: game = active_games.get(lid)
-
     if not game: return
+
+    # Обновляем активность
+    lobby = lobby_manager.get_lobby(game.lobby_id)
+    if lobby: lobby.touch()
 
     events = await game.handle_action(player_id=callback.from_user.id, action_data=callback.data)
     if events: events[0].extra_data["query_id"] = callback.id
@@ -426,6 +446,8 @@ async def game_action_handler(callback: CallbackQuery):
 
 async def main():
     await start_web_server()
+    # Запускаем уборщика лобби
+    asyncio.create_task(cleanup_lobbies_task())
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         print("✅ Core System Online.")

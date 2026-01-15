@@ -107,26 +107,16 @@ class BunkerGame(GameEngine):
 
     # --- ЭТАП 2: ВЫПОЛНЕНИЕ ХОДА ---
     async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
-        # УБРАЛИ sleep(2.0), так как LLM и так думает время.
-        # Это ускорит реакцию на 2 секунды.
-
         bot = next((p for p in self.players if p.id == bot_id), None)
         if not bot: return []
 
         events = []
-
-        # 1. Режиссер (Быстрый чек)
         instr = await self.director_agent.get_hidden_instruction(
             bot, self.players, self.state, logger=self.logger
         )
-
-        # 2. Бот (Генерация речи - самое долгое)
         speech = await self.bot_agent.make_turn(
             bot, self.players, self.state, instr, logger=self.logger
         )
-
-        # 3. Судья (Анализ)
-        # Судья работает ПОСЛЕ генерации речи, поэтому пользователь уже ждет 2 шага.
         await self.judge_agent.analyze_move(
             bot, speech, self.state.shared_data["topic"], logger=self.logger
         )
@@ -207,6 +197,51 @@ class BunkerGame(GameEngine):
 
         return events
 
+    # === НОВЫЙ МЕТОД: ВЫХОД ИГРОКА ===
+    async def player_leave(self, player_id: int) -> List[GameEvent]:
+        events = []
+        player = next((p for p in self.players if p.id == player_id), None)
+        if not player or not player.is_alive: return []
+
+        # 1. Убиваем персонажа
+        player.is_alive = False
+        events.append(GameEvent(type="message", content=f"🚪 <b>{player.name}</b> покинул игру (дезертировал)."))
+
+        # 2. Проверяем условия победы/поражения
+        survivors = [p for p in self.players if p.is_alive]
+        humans_alive = any(p.is_human for p in survivors)
+        target_survivors = bunker_cfg.gameplay["rounds"]["target_survivors"]
+
+        if not humans_alive:
+            events.append(GameEvent(type="game_over", content="💀 Все люди покинули бункер. GAME OVER."))
+            return events
+
+        if len(survivors) <= target_survivors:
+            events.append(GameEvent(type="game_over",
+                                    content=f"🎉 <b>ПОБЕДА!</b> (Техническая)\nВыжили: {', '.join([p.name for p in survivors])}"))
+            return events
+
+        # 3. Обновляем дашборд
+        dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
+                                              survivors)
+        events.append(GameEvent(type="update_dashboard", content=dash))
+
+        # 4. Если сейчас была его очередь -> передаем ход
+        # Если сейчас фаза голосования -> проверяем кворум
+        if self.state.phase == "voting":
+            if player.name in self.votes:
+                del self.votes[player.name]
+
+            alive_count = len(survivors)
+            if len(self.votes) >= alive_count:
+                res = await self._finish_voting()
+                events.extend(res)
+        else:
+            # В фазе обсуждения просто дергаем переключатель, он сам пропустит мертвого
+            events.append(GameEvent(type="switch_turn"))
+
+        return events
+
     # --- Внутренние методы ---
 
     def _get_topic(self, round_num: int, catastrophe: dict) -> str:
@@ -222,7 +257,6 @@ class BunkerGame(GameEngine):
 
     async def _next_phase(self) -> List[GameEvent]:
         events = []
-
         if self.state.phase == "presentation":
             self.state.phase = "discussion"
             self.current_turn_index = 0
@@ -237,7 +271,6 @@ class BunkerGame(GameEngine):
         elif self.state.phase in ["discussion", "runoff"]:
             self.state.phase = "voting"
             events.extend(await self._start_voting_phase())
-
         return events
 
     async def _start_voting_phase(self) -> List[GameEvent]:
@@ -255,7 +288,6 @@ class BunkerGame(GameEngine):
         else:
             candidates = [p for p in self.players if p.is_alive]
 
-        # ЛЮДИ
         for p in self.players:
             if p.is_human and p.is_alive:
                 my_targets = [t for t in candidates if t.name != p.name]
@@ -280,7 +312,6 @@ class BunkerGame(GameEngine):
                         reply_markup=keyboard_data
                     ))
 
-        # БОТЫ
         for p in self.players:
             if not p.is_human and p.is_alive:
                 vote = await self.bot_agent.make_vote(p, candidates, self.state, logger=self.logger)

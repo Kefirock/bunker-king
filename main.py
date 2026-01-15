@@ -33,7 +33,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN: sys.exit("Error: BOT_TOKEN is missing")
 
-# Загружаем ID админа
 raw_admin_id = os.getenv("ADMIN_ID")
 ADMIN_ID = int(raw_admin_id) if raw_admin_id else None
 
@@ -105,7 +104,7 @@ async def broadcast_lobby_ui(lobby: Lobby):
 
     dead_users = []
     for user_id, message_id in lobby.user_interfaces.items():
-        if user_id < 0: continue  # Пропускаем фейков
+        if user_id < 0: continue
 
         kb = InlineKeyboardBuilder()
         if user_id == lobby.host_id:
@@ -129,7 +128,7 @@ async def broadcast_lobby_ui(lobby: Lobby):
             asyncio.create_task(broadcast_lobby_ui(lobby))
 
 
-# === EVENT PROCESSOR ===
+# === EVENT PROCESSOR (ROUTING FIX) ===
 
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
@@ -138,6 +137,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
     for event in events:
         try:
+            # Typing status только живым людям
             if event.type in ["message", "bot_think"]:
                 targets = [p.id for p in game.players if p.is_human]
                 for tid in targets:
@@ -158,7 +158,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     kb = builder.as_markup()
 
                 for tid in targets:
-                    # 1. Реальный игрок
+                    # 1. Реальный игрок (ID > 0)
                     if tid > 0:
                         sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
@@ -173,11 +173,12 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                         if event.token:
                             message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
 
-                    # 2. Фейковый игрок -> Шлем Админу для отладки
-                    elif tid < 0 and ADMIN_ID:
+                    # 2. Фейковый игрок (ID <= -50000) -> Шлем Админу
+                    # AI-боты (от -1000 до -5000) игнорируются
+                    elif tid <= -50000 and ADMIN_ID:
                         fake_p = next((p for p in game.players if p.id == tid), None)
                         fake_name = fake_p.name if fake_p else f"ID {tid}"
-                        debug_text = f"🔧 <b>[Debug for {fake_name}]</b>:\n{event.content}"
+                        debug_text = f"🔧 <b>[To {fake_name}]</b>:\n{event.content}"
                         try:
                             await bot.send_message(chat_id=ADMIN_ID, text=debug_text)
                         except:
@@ -186,15 +187,16 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             elif event.type == "edit_message":
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 for tid in targets:
-                    if tid < 0: continue
-                    msg_id = message_tokens.get(f"{tid}:{event.token}")
-                    if msg_id:
-                        try:
-                            await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
-                        except:
-                            pass
-                    else:
-                        await bot.send_message(chat_id=tid, text=event.content)
+                    # Редактируем только реальным людям
+                    if tid > 0:
+                        msg_id = message_tokens.get(f"{tid}:{event.token}")
+                        if msg_id:
+                            try:
+                                await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
+                            except:
+                                pass
+                        else:
+                            await bot.send_message(chat_id=tid, text=event.content)
 
             elif event.type == "update_dashboard":
                 if game.lobby_id in dashboard_map:
@@ -236,25 +238,18 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             logging.error(f"Event Error ({event.type}): {e}")
 
 
-# === DEBUG & ADMIN COMMANDS ===
+# === ADMIN COMMANDS ===
 
 @router.message(Command("fake_join"))
 async def cmd_fake_join(message: Message, command: CommandObject):
-    """
-    Добавляет фейкового игрока в лобби админа.
-    Использование: /fake_join [Имя]
-    """
     user_id = message.from_user.id
-
-    # 1. Проверка прав (с уведомлением)
     if not ADMIN_ID or user_id != ADMIN_ID:
         await message.reply(f"⛔ Вы не админ. Ваш ID: <code>{user_id}</code>")
         return
 
-    # 2. Ищем лобби админа
     lid = lobby_manager.user_to_lobby.get(user_id)
     if not lid:
-        await message.reply("⚠️ Вы должны находиться в Лобби, чтобы добавлять фейков.")
+        await message.reply("⚠️ Нет лобби.")
         return
 
     lobby = lobby_manager.get_lobby(lid)
@@ -262,11 +257,10 @@ async def cmd_fake_join(message: Message, command: CommandObject):
         await message.reply("❌ Лобби не найдено или игра уже идет.")
         return
 
-    # 3. Генерируем данные
     fake_name = command.args if command.args else f"Fake_{random.choice(['Bob', 'Alice', 'John'])}"
+    # ID в диапазоне фейков (<= -50000)
     fake_id = -random.randint(50000, 99999)
 
-    # 4. Добавляем
     lobby.add_player(fake_id, fake_name)
     await message.reply(f"🤖 Фейк <b>{fake_name}</b> добавлен.")
     await broadcast_lobby_ui(lobby)
@@ -274,66 +268,47 @@ async def cmd_fake_join(message: Message, command: CommandObject):
 
 @router.message(Command("fake_say"))
 async def cmd_fake_say(message: Message, command: CommandObject):
-    """
-    Отправляет сообщение от имени текущего фейкового игрока.
-    Использование: /fake_say Текст
-    """
     user_id = message.from_user.id
-
-    if not ADMIN_ID or user_id != ADMIN_ID:
-        await message.reply(f"⛔ Вы не админ. Ваш ID: <code>{user_id}</code>")
-        return
+    if not ADMIN_ID or user_id != ADMIN_ID: return
 
     lid = lobby_manager.user_to_lobby.get(user_id)
-    if not lid or lid not in active_games:
-        await message.reply("Игра не найдена (вы должны быть участником).")
-        return
+    if not lid or lid not in active_games: return
 
     game = active_games[lid]
     text = command.args
-    if not text:
-        await message.reply("Пустой текст.")
-        return
+    if not text: return
 
-    # Определяем, чей ход (если это фейк)
     active_list = [p for p in game.players if p.is_alive]
     if game.state.phase == "runoff":
         active_list = [p for p in active_list if p.name in game.state.shared_data.get("runoff_candidates", [])]
 
-    if game.current_turn_index >= len(active_list):
-        await message.reply("Смена фазы, ждать.")
-        return
-
+    if game.current_turn_index >= len(active_list): return
     current_player = active_list[game.current_turn_index]
 
     if current_player.id > 0:
-        await message.reply(f"Сейчас ход реального игрока {current_player.name} (ID {current_player.id}).")
+        await message.reply(f"Сейчас ход реального игрока {current_player.name}.")
         return
 
-    # Отправляем сообщение от имени фейка
     events = await game.process_message(player_id=current_player.id, text=text)
     await process_game_events(game.lobby_id, events)
 
 
 @router.message(Command("kick"))
 async def cmd_kick(message: Message, command: CommandObject):
-    """Кик игрока: /kick Name (Только Хост)"""
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
-
     if not lid or lid not in active_games: return
     game = active_games[lid]
     lobby = lobby_manager.get_lobby(lid)
 
-    # Только хост
     if lobby and lobby.host_id != message.from_user.id:
         await message.reply("⛔ Только хост может кикать.")
         return
 
     target_name = command.args
     if not target_name:
-        await message.reply("Укажите имя: `/kick Alex`")
+        await message.reply("Укажите имя.")
         return
 
     target_player = next((p for p in game.players if target_name.lower() in p.name.lower() and p.is_human), None)
@@ -349,12 +324,10 @@ async def cmd_kick(message: Message, command: CommandObject):
 
 @router.message(Command("skip"))
 async def cmd_skip(message: Message):
-    """Принудительный пропуск хода (Любой участник, если зависло)"""
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
 
-    # В соло работает всегда, в мульти - можно ограничить хостом, но для дебага оставим всем
     if lid and lid in active_games:
         await process_game_events(lid, [GameEvent(type="switch_turn")])
         await message.reply("⏩ Ход пропущен.")
@@ -362,46 +335,35 @@ async def cmd_skip(message: Message):
 
 @router.message(Command("vote_as"))
 async def cmd_vote_as(message: Message, command: CommandObject):
-    """
-    /vote_as <Кто> <За_Кого> (Хост или Админ)
-    """
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
-
     if not lid or lid not in active_games: return
     game = active_games[lid]
     lobby = lobby_manager.get_lobby(lid)
 
-    # Проверка прав
     is_host = lobby and lobby.host_id == message.from_user.id
     is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
 
-    if not (is_host or is_admin):
-        await message.reply(f"⛔ Нет прав. Вы не хост и не админ ({message.from_user.id}).")
-        return
+    if not (is_host or is_admin): return
 
     args = command.args.split(maxsplit=1) if command.args else []
-    if len(args) < 2:
-        await message.reply("Формат: `/vote_as Alice Bob`")
-        return
+    if len(args) < 2: return
 
     voter_name = args[0]
     target_name = args[1]
 
     voter = next((p for p in game.players if voter_name.lower() in p.name.lower()), None)
-    if not voter:
-        await message.reply(f"Игрок '{voter_name}' не найден.")
-        return
+    if not voter: return
 
     action_data = f"vote_{target_name}"
     events = await game.handle_action(player_id=voter.id, action_data=action_data)
 
     if events:
-        await message.reply(f"✅ Голос принят: {voter.name} -> {target_name}")
+        await message.reply(f"✅ Голос: {voter.name} -> {target_name}")
         await process_game_events(game.lobby_id, events)
     else:
-        await message.reply("❌ Ошибка (возможно, уже голосовал или не фаза голосования).")
+        await message.reply("❌ Ошибка.")
 
 
 # === HANDLERS (STANDARD) ===
@@ -499,6 +461,7 @@ async def join_lobby_logic(message: Message, lobby_id: str):
 async def lobby_leave_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     lid = lobby_manager.user_to_lobby.get(user_id)
+
     if lid and lid in active_games:
         game = active_games[lid]
         game_events = await game.player_leave(user_id)

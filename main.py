@@ -19,7 +19,7 @@ from aiohttp import web
 
 from src.core.schemas import GameEvent
 from src.core.lobby import lobby_manager, Lobby
-from src.core.s3 import s3_uploader  # <--- НОВЫЙ ИМПОРТ
+from src.core.s3 import s3_uploader
 
 try:
     from src.games.bunker.game import BunkerGame
@@ -32,6 +32,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN: sys.exit("Error: BOT_TOKEN is missing")
+
+# Загружаем ID админа для тестов
+raw_admin_id = os.getenv("ADMIN_ID")
+ADMIN_ID = int(raw_admin_id) if raw_admin_id else None
+if not ADMIN_ID:
+    print("⚠️ ADMIN_ID not set. Debug commands disabled.")
 
 bot = Bot(token=BOT_TOKEN, session=AiohttpSession(), default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -101,6 +107,9 @@ async def broadcast_lobby_ui(lobby: Lobby):
 
     dead_users = []
     for user_id, message_id in lobby.user_interfaces.items():
+        # Фейкам интерфейс не обновляем (у них нет чата)
+        if user_id < 0: continue
+
         kb = InlineKeyboardBuilder()
         if user_id == lobby.host_id:
             kb.add(InlineKeyboardButton(text="🚀 СТАРТ", callback_data=f"lobby_start_{lobby.lobby_id}"))
@@ -123,7 +132,7 @@ async def broadcast_lobby_ui(lobby: Lobby):
             asyncio.create_task(broadcast_lobby_ui(lobby))
 
 
-# === EVENT PROCESSOR ===
+# === EVENT PROCESSOR (ROUTING) ===
 
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
@@ -135,10 +144,11 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             if event.type in ["message", "bot_think"]:
                 targets = [p.id for p in game.players if p.is_human]
                 for tid in targets:
-                    try:
-                        await bot.send_chat_action(tid, "typing")
-                    except:
-                        pass
+                    if tid > 0:  # Только реальным людям
+                        try:
+                            await bot.send_chat_action(tid, "typing")
+                        except:
+                            pass
 
             if event.type == "message":
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
@@ -151,23 +161,42 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     kb = builder.as_markup()
 
                 for tid in targets:
-                    if isinstance(tid, int) and tid < 0: continue
-                    sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
+                    # РОУТИНГ СООБЩЕНИЙ
 
-                    if event.extra_data.get("is_dashboard"):
-                        if game.lobby_id not in dashboard_map: dashboard_map[game.lobby_id] = {}
-                        dashboard_map[game.lobby_id][tid] = sent_msg.message_id
+                    # 1. Реальный игрок
+                    if tid > 0:
+                        sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
+
+                        if event.extra_data.get("is_dashboard"):
+                            if game.lobby_id not in dashboard_map: dashboard_map[game.lobby_id] = {}
+                            dashboard_map[game.lobby_id][tid] = sent_msg.message_id
+                            try:
+                                await bot.pin_chat_message(chat_id=tid, message_id=sent_msg.message_id)
+                            except:
+                                pass
+
+                        if event.token:
+                            message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
+
+                    # 2. Фейковый игрок (для тестов) -> Шлем Админу
+                    elif tid < 0 and ADMIN_ID:
+                        # Пытаемся найти имя фейка для красоты
+                        fake_p = next((p for p in game.players if p.id == tid), None)
+                        fake_name = fake_p.name if fake_p else f"ID {tid}"
+
+                        debug_text = f"🔧 <b>[Debug for {fake_name}]</b>:\n{event.content}"
+                        # Клавиатуру фейку тоже показываем админу, но кнопки не сработают "от имени фейка" напрямую
+                        # Для нажатия кнопок за фейка нужна команда /vote_as
                         try:
-                            await bot.pin_chat_message(chat_id=tid, message_id=sent_msg.message_id)
+                            await bot.send_message(chat_id=ADMIN_ID, text=debug_text)
                         except:
                             pass
-
-                    if event.token:
-                        message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
 
             elif event.type == "edit_message":
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 for tid in targets:
+                    if tid < 0: continue  # Фейкам не редактируем (слишком сложно отслеживать ID)
+
                     msg_id = message_tokens.get(f"{tid}:{event.token}")
                     if msg_id:
                         try:
@@ -186,21 +215,19 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                             pass
 
             elif event.type == "callback_answer":
-                if event.target_ids:
+                if event.target_ids and event.target_ids[0] > 0:
                     await bot.answer_callback_query(callback_query_id=event.extra_data.get("query_id"),
                                                     text=event.content)
 
             elif event.type == "game_over":
                 targets = [p.id for p in game.players if p.is_human]
                 for tid in targets:
-                    await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
+                    if tid > 0: await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
 
-                # --- S3 UPLOAD START ---
-                # Выгружаем логи в облако, если настроено
+                # S3 Upload
                 if hasattr(game, "logger") and game.logger:
                     path = game.logger.get_session_path()
                     asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, path))
-                # --- S3 UPLOAD END ---
 
                 if game.lobby_id in active_games: del active_games[game.lobby_id]
                 if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
@@ -220,15 +247,109 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             logging.error(f"Event Error ({event.type}): {e}")
 
 
-# === ADMIN COMMANDS ===
+# === ADMIN DEBUG COMMANDS ===
+
+@router.message(Command("fake_join"))
+async def cmd_fake_join(message: Message, command: CommandObject):
+    """
+    Добавляет фейкового игрока в лобби админа.
+    Использование: /fake_join [Имя]
+    """
+    # 1. Проверка прав
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        return
+
+    # 2. Ищем лобби админа
+    lid = lobby_manager.user_to_lobby.get(ADMIN_ID)
+    if not lid:
+        await message.reply("Вы не находитесь в лобби.")
+        return
+
+    lobby = lobby_manager.get_lobby(lid)
+    if not lobby or lobby.status != "waiting":
+        await message.reply("Лобби не найдено или игра уже идет.")
+        return
+
+    # 3. Генерируем данные
+    fake_name = command.args if command.args else f"Fake_{random.choice(['Bob', 'Alice', 'John'])}"
+    # ID делаем отрицательным, но большим, чтобы не пересекался с ботами (-1000)
+    fake_id = -random.randint(50000, 99999)
+
+    # 4. Добавляем
+    lobby.add_player(fake_id, fake_name)
+    await message.reply(f"🤖 Фейк <b>{fake_name}</b> (ID {fake_id}) добавлен.")
+
+    # 5. Обновляем UI всем реальным игрокам
+    await broadcast_lobby_ui(lobby)
+
+
+@router.message(Command("fake_say"))
+async def cmd_fake_say(message: Message, command: CommandObject):
+    """
+    Отправляет сообщение от имени текущего фейкового игрока.
+    Использование: /fake_say Всем привет!
+    """
+    # 1. Проверка прав
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID: return
+
+    # 2. Ищем игру
+    lid = lobby_manager.user_to_lobby.get(ADMIN_ID)
+    if not lid or lid not in active_games:
+        await message.reply("Игра не найдена.")
+        return
+
+    game = active_games[lid]
+    text = command.args
+    if not text:
+        await message.reply("Текст сообщения пуст.")
+        return
+
+    # 3. Определяем, чей ход
+    # В BunkerGame нет простого геттера current_player, но мы знаем логику
+    # Мы можем просто перебрать игроков и найти фейка, чья очередь.
+    # Но проще: мы просто передаем ID текущего активного игрока, ЕСЛИ он фейк.
+
+    # Получаем список активных (как в game.process_turn)
+    # Это небольшой хак: мы дублируем логику определения очереди,
+    # чтобы узнать ID. В идеале нужно добавить метод get_current_player_id в GameEngine.
+
+    active_list = [p for p in game.players if p.is_alive]
+    if game.state.phase == "runoff":
+        active_list = [p for p in active_list if p.name in game.state.shared_data.get("runoff_candidates", [])]
+
+    if game.current_turn_index >= len(active_list):
+        await message.reply("Сейчас смена фазы, говорить нельзя.")
+        return
+
+    current_player = active_list[game.current_turn_index]
+
+    # Проверяем, что это наш фейк (ID < 0 и ID не равен авто-ботам)
+    # Автоботы обычно имеют ID -1000...-2000. Фейки: -50000.
+    # Но для упрощения разрешим говорить за любого "бота" (даже AI), если хочется перехватить управление.
+
+    if current_player.id > 0:
+        await message.reply(f"Сейчас ход реального игрока {current_player.name}. Нельзя говорить за него.")
+        return
+
+    # 4. Отправляем в движок
+    # Движок обработает это как process_message от человека
+    # (потому что мы не вызываем bot logic, а суем текст напрямую)
+    events = await game.process_message(player_id=current_player.id, text=text)
+
+    # 5. Обрабатываем результат
+    await process_game_events(game.lobby_id, events)
+    # Удаляем команду админа, чтобы не палиться (опционально)
+    # try: await message.delete()
+    # except: pass
+
+
+# === ADMIN MODERATION COMMANDS ===
 
 @router.message(Command("kick"))
 async def cmd_kick(message: Message, command: CommandObject):
-    """Кик игрока: /kick Name"""
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
-
     if not lid or lid not in active_games: return
     game = active_games[lid]
     lobby = lobby_manager.get_lobby(lid)
@@ -255,10 +376,10 @@ async def cmd_kick(message: Message, command: CommandObject):
 
 @router.message(Command("skip"))
 async def cmd_skip(message: Message):
-    """Принудительный пропуск хода"""
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
+
     if lid and lid in active_games:
         await process_game_events(lid, [GameEvent(type="switch_turn")])
         await message.reply("⏩ Ход пропущен.")
@@ -266,52 +387,45 @@ async def cmd_skip(message: Message):
 
 @router.message(Command("vote_as"))
 async def cmd_vote_as(message: Message, command: CommandObject):
-    """
-    Голос от имени другого игрока (если тот уснул).
-    /vote_as <Кто_Голосует> <За_Кого>
-    """
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
-
     if not lid or lid not in active_games: return
     game = active_games[lid]
     lobby = lobby_manager.get_lobby(lid)
 
-    # Только хост
-    if lobby and lobby.host_id != message.from_user.id:
-        await message.reply("⛔ Только хост.")
+    # Только хост или админ
+    is_host = lobby and lobby.host_id == message.from_user.id
+    is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
+
+    if not (is_host or is_admin):
+        await message.reply("⛔ Нет прав.")
         return
 
     args = command.args.split(maxsplit=1) if command.args else []
     if len(args) < 2:
-        await message.reply("Формат: `/vote_as Alice Bob` (Алиса голосует против Боба)")
+        await message.reply("Формат: `/vote_as Alice Bob`")
         return
 
     voter_name = args[0]
     target_name = args[1]
 
-    # Ищем игрока-автора голоса
     voter = next((p for p in game.players if voter_name.lower() in p.name.lower()), None)
     if not voter:
         await message.reply(f"Игрок '{voter_name}' не найден.")
         return
 
-    # Эмулируем нажатие кнопки
-    # Важно: движок ждет "vote_ИмяЦели"
-    # Нам не нужно искать объект цели здесь, игра сама проверит имя внутри handle_action
-
     action_data = f"vote_{target_name}"
     events = await game.handle_action(player_id=voter.id, action_data=action_data)
 
     if events:
-        await message.reply(f"✅ Голос принят: {voter.name} -> {target_name}")
+        await message.reply(f"✅ Голос: {voter.name} -> {target_name}")
         await process_game_events(game.lobby_id, events)
     else:
-        await message.reply("❌ Ошибка: голос не принят (возможно, не фаза голосования или неверное имя цели).")
+        await message.reply("❌ Ошибка голосования.")
 
 
-# === HANDLERS (Стандартные) ===
+# === HANDLERS (STANDARD) ===
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
@@ -406,7 +520,6 @@ async def join_lobby_logic(message: Message, lobby_id: str):
 async def lobby_leave_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     lid = lobby_manager.user_to_lobby.get(user_id)
-
     if lid and lid in active_games:
         game = active_games[lid]
         game_events = await game.player_leave(user_id)
@@ -421,7 +534,6 @@ async def lobby_leave_handler(callback: CallbackQuery):
             await callback.answer("Вы вышли.")
             current_lobby = lobby_manager.get_lobby(lobby.lobby_id)
             if current_lobby: await broadcast_lobby_ui(current_lobby)
-
     await cmd_start(callback.message, CommandObject())
 
 
@@ -460,7 +572,6 @@ async def chat_message_handler(message: Message):
     else:
         lid = lobby_manager.user_to_lobby.get(chat_id)
         if lid: game = active_games.get(lid)
-
     if not game: return
     lobby = lobby_manager.get_lobby(game.lobby_id)
     if lobby: lobby.touch()
@@ -479,7 +590,6 @@ async def game_action_handler(callback: CallbackQuery):
         lid = lobby_manager.user_to_lobby.get(chat_id)
         if lid: game = active_games.get(lid)
     if not game: return
-
     lobby = lobby_manager.get_lobby(game.lobby_id)
     if lobby: lobby.touch()
 

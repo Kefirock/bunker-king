@@ -274,33 +274,53 @@ async def cmd_fake_join(message: Message, command: CommandObject):
     await message.reply(f"🤖 Фейк <b>{fake_name}</b> добавлен.")
     await broadcast_lobby_ui(lobby)
 
-
 @router.message(Command("fake_say"))
 async def cmd_fake_say(message: Message, command: CommandObject):
     user_id = message.from_user.id
-    if not ADMIN_ID or user_id != ADMIN_ID: return
+
+    # Проверка прав с выводом
+    if not ADMIN_ID or user_id != ADMIN_ID:
+        await message.reply("⛔ Нет прав админа.")
+        return
 
     lid = lobby_manager.user_to_lobby.get(user_id)
-    if not lid or lid not in active_games: return
+    if not lid or lid not in active_games:
+        await message.reply("⚠️ Вы не в активной игре.")
+        return
 
     game = active_games[lid]
     text = command.args
-    if not text: return
+    if not text:
+        await message.reply("⚠️ Текст сообщения пуст.")
+        return
 
+    # Определяем, чей ход
     active_list = [p for p in game.players if p.is_alive]
     if game.state.phase == "runoff":
         active_list = [p for p in active_list if p.name in game.state.shared_data.get("runoff_candidates", [])]
 
-    if game.current_turn_index >= len(active_list): return
-    current_player = active_list[game.current_turn_index]
-
-    if current_player.id > 0:
-        await message.reply(f"Сейчас ход реального игрока {current_player.name}.")
+    if game.current_turn_index >= len(active_list):
+        await message.reply("⏳ Идет смена фазы, подождите...")
         return
 
-    events = await game.process_message(player_id=current_player.id, text=text)
-    await process_game_events(game.lobby_id, events)
+    current_player = active_list[game.current_turn_index]
 
+    # Разрешаем говорить ТОЛЬКО если это фейк (ID < 0)
+    # Если это реальный игрок, админ не должен за него говорить (это нарушает целостность)
+    # Но если очень хочется для теста - можно убрать проверку.
+    if current_player.id > 0:
+        await message.reply(f"🚫 Сейчас ход реального игрока: <b>{current_player.name}</b> (ID {current_player.id}).")
+        return
+
+    # Пробуем отправить
+    events = await game.process_message(player_id=current_player.id, text=text)
+
+    if not events:
+        await message.reply("⚠️ Движок игры не вернул событий. Возможно, ошибка очередности.")
+    else:
+        # Успех
+        await message.answer(f"✅ Отправлено за <b>{current_player.name}</b>: {text}")
+        await process_game_events(game.lobby_id, events)
 
 @router.message(Command("kick"))
 async def cmd_kick(message: Message, command: CommandObject):

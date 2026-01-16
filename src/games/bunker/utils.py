@@ -21,11 +21,12 @@ class BunkerUtils:
 
         players = []
 
-        # 1. Люди
+        # 1. Обрабатываем пришедших из Лобби
         for u in user_data:
             p_name = u["name"]
             prof = profs.pop() if profs else "Выживший"
             trait = traits.pop() if traits else "Счастливчик"
+            uid = u["id"]
 
             attrs = {
                 "profession": prof,
@@ -33,18 +34,37 @@ class BunkerUtils:
                 "health": 100,
                 "status": "NORMAL",
                 "active_factors": {},
-                "personality": {"id": "human", "description": "Живой Игрок"}
             }
 
+            # ЛОГИКА ОПРЕДЕЛЕНИЯ ТИПА:
+            # 1. Реальный человек (ID > 0) -> is_human = True
+            # 2. Марионетка Админа (ID < -10000) -> is_human = True (Мы управляем ими)
+            # 3. Авто-бот (ID -1000...-5000) -> is_human = False (Играет сам)
+
+            # В данном цикле у нас только люди и марионетки из лобби.
+            # Авто-боты добавляются ниже.
+
+            # Если это марионетка (Fake Join), даем ей флаг Human, чтобы игра ждала /fake_say
+            is_puppet = uid < 0
+
+            if is_puppet:
+                # Марионетке нужна личность для красоты, но управляет ей человек
+                attrs["personality"] = {"id": "puppet", "description": "Марионетка Админа"}
+                # ВАЖНО: Ставим True, чтобы game.py слал "ВАШ ХОД" и ждал ввода
+                is_human_flag = True
+            else:
+                attrs["personality"] = {"id": "human", "description": "Живой Игрок"}
+                is_human_flag = True
+
             p = BasePlayer(
-                id=u["id"],
+                id=uid,
                 name=p_name,
-                is_human=True,
+                is_human=is_human_flag,
                 attributes=attrs
             )
             players.append(p)
 
-        # 2. Боты
+        # 2. Авто-заполнение ИИ БОТАМИ
         bots_needed = max(0, target_total - len(players))
 
         for i in range(bots_needed):
@@ -62,12 +82,12 @@ class BunkerUtils:
                 "personality": pers_data
             }
 
-            fake_id = -(2000 + i)
+            fake_id = -(1000 + i)  # ID -1000... (диапазон ИИ)
 
             p = BasePlayer(
                 id=fake_id,
                 name=bot_name,
-                is_human=False,
+                is_human=False,  # ЭТО ИИ, ОН ИГРАЕТ САМ
                 attributes=attrs
             )
             players.append(p)
@@ -85,7 +105,6 @@ class BunkerUtils:
         status_marker = " 💀" if not p.is_alive else ""
 
         if reveal_all or not p.is_alive:
-            # Полное раскрытие
             role_info = ""
             if attrs.get("status") == "LIAR": role_info = " [🤥 ЛЖЕЦ]"
             return f"<b>{p.name}</b> — {prof}, {trait}{role_info}{status_marker}"
@@ -113,10 +132,8 @@ class BunkerUtils:
             f"👥 <b>ВЫЖИВШИЕ:</b>\n{list_str}"
         )
 
-    # === НОВЫЙ МЕТОД ===
     @staticmethod
     def generate_game_report(players: List[BasePlayer], result_text: str) -> str:
-        """Генерирует финальный отчет со вскрытием всех ролей"""
         report = f"{result_text}\n\n<b>📝 РАСКРЫТИЕ КАРТ:</b>\n"
 
         survivors = [p for p in players if p.is_alive]

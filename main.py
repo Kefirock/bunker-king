@@ -128,7 +128,7 @@ async def broadcast_lobby_ui(lobby: Lobby):
             asyncio.create_task(broadcast_lobby_ui(lobby))
 
 
-# === EVENT PROCESSOR (ROUTING FIX) ===
+# === EVENT PROCESSOR (FINAL ROUTING FIX) ===
 
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
@@ -137,9 +137,9 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
     for event in events:
         try:
-            # Typing status только живым людям
             if event.type in ["message", "bot_think"]:
-                targets = [p.id for p in game.players if p.is_human]
+                # Статус тайпинга только живым
+                targets = [p.id for p in game.players if p.is_human and p.is_alive]
                 for tid in targets:
                     if tid > 0:
                         try:
@@ -148,7 +148,12 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                             pass
 
             if event.type == "message":
-                targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
+                # Если target_ids пуст -> шлем всем ЖИВЫМ людям
+                if not event.target_ids:
+                    targets = [p.id for p in game.players if p.is_human and p.is_alive]
+                else:
+                    targets = event.target_ids
+
                 kb = None
                 if event.reply_markup:
                     builder = InlineKeyboardBuilder()
@@ -158,7 +163,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     kb = builder.as_markup()
 
                 for tid in targets:
-                    # 1. Реальный игрок (ID > 0)
+                    # 1. Реальный игрок
                     if tid > 0:
                         sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
@@ -173,30 +178,34 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                         if event.token:
                             message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
 
-                    # 2. Фейковый игрок (ID <= -50000) -> Шлем Админу
-                    # AI-боты (от -1000 до -5000) игнорируются
+                    # 2. Фейковый игрок
                     elif tid <= -50000 and ADMIN_ID:
                         fake_p = next((p for p in game.players if p.id == tid), None)
-                        fake_name = fake_p.name if fake_p else f"ID {tid}"
-                        debug_text = f"🔧 <b>[To {fake_name}]</b>:\n{event.content}"
-                        try:
-                            await bot.send_message(chat_id=ADMIN_ID, text=debug_text)
-                        except:
-                            pass
+                        if fake_p:  # Если игрок найден
+                            # Проверяем, жив ли фейк. Если мертв - не шлем (чтобы не спамить админу)
+                            if not fake_p.is_alive and "GAME OVER" not in event.content:
+                                continue
 
-            elif event.type == "edit_message":
-                targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
-                for tid in targets:
-                    # Редактируем только реальным людям
-                    if tid > 0:
-                        msg_id = message_tokens.get(f"{tid}:{event.token}")
-                        if msg_id:
+                            fake_name = fake_p.name
+                            debug_text = f"🔧 <b>[To {fake_name}]</b>:\n{event.content}"
                             try:
-                                await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
+                                await bot.send_message(chat_id=ADMIN_ID, text=debug_text)
                             except:
                                 pass
-                        else:
-                            await bot.send_message(chat_id=tid, text=event.content)
+
+            elif event.type == "edit_message":
+                targets = event.target_ids if event.target_ids else [p.id for p in game.players if
+                                                                     p.is_human and p.is_alive]
+                for tid in targets:
+                    if tid < 0: continue
+                    msg_id = message_tokens.get(f"{tid}:{event.token}")
+                    if msg_id:
+                        try:
+                            await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
+                        except:
+                            pass
+                    else:
+                        await bot.send_message(chat_id=tid, text=event.content)
 
             elif event.type == "update_dashboard":
                 if game.lobby_id in dashboard_map:
@@ -212,6 +221,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                                                     text=event.content)
 
             elif event.type == "game_over":
+                # Game Over шлем всем, даже мертвым
                 targets = [p.id for p in game.players if p.is_human]
                 for tid in targets:
                     if tid > 0: await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
@@ -258,7 +268,6 @@ async def cmd_fake_join(message: Message, command: CommandObject):
         return
 
     fake_name = command.args if command.args else f"Fake_{random.choice(['Bob', 'Alice', 'John'])}"
-    # ID в диапазоне фейков (<= -50000)
     fake_id = -random.randint(50000, 99999)
 
     lobby.add_player(fake_id, fake_name)
@@ -327,7 +336,6 @@ async def cmd_skip(message: Message):
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
-
     if lid and lid in active_games:
         await process_game_events(lid, [GameEvent(type="switch_turn")])
         await message.reply("⏩ Ход пропущен.")

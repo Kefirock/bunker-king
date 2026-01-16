@@ -7,16 +7,12 @@ from src.games.bunker.config import bunker_cfg
 class BunkerUtils:
     @staticmethod
     def generate_initial_players(user_data: List[Dict]) -> List[BasePlayer]:
-        """
-        user_data: список только живых людей [{'id': 123, 'name': 'Bob'}]
-        """
         scenarios = bunker_cfg.scenarios
         profs = scenarios["professions"][:]
         traits = scenarios["traits"][:]
         names = scenarios["bot_names"][:]
         personalities = scenarios.get("personalities", [])
 
-        # Берем настройки из конфига (по умолчанию 6 игроков)
         target_total = bunker_cfg.gameplay.get("setup", {}).get("total_players", 6)
 
         random.shuffle(profs)
@@ -25,7 +21,7 @@ class BunkerUtils:
 
         players = []
 
-        # 1. Создаем ЛЮДЕЙ
+        # 1. Люди
         for u in user_data:
             p_name = u["name"]
             prof = profs.pop() if profs else "Выживший"
@@ -37,7 +33,6 @@ class BunkerUtils:
                 "health": 100,
                 "status": "NORMAL",
                 "active_factors": {},
-                # Люди играют сами за себя, у них нет Personality-множителей страха
                 "personality": {"id": "human", "description": "Живой Игрок"}
             }
 
@@ -49,8 +44,7 @@ class BunkerUtils:
             )
             players.append(p)
 
-        # 2. Авто-заполнение БОТАМИ
-        # Если пришло 2 человека, а надо 6 -> создаем 4 бота
+        # 2. Боты
         bots_needed = max(0, target_total - len(players))
 
         for i in range(bots_needed):
@@ -68,7 +62,6 @@ class BunkerUtils:
                 "personality": pers_data
             }
 
-            # Генерируем безопасный ID для бота
             fake_id = -(2000 + i)
 
             p = BasePlayer(
@@ -91,13 +84,14 @@ class BunkerUtils:
         trait = attrs.get("trait", "???")
         status_marker = " 💀" if not p.is_alive else ""
 
-        if not p.is_alive or reveal_all:
+        if reveal_all or not p.is_alive:
+            # Полное раскрытие
             role_info = ""
-            if attrs.get("status") == "LIAR": role_info = " [ЛЖЕЦ]"
-            return f"<b>{p.name}</b> - {prof}, {trait}{role_info}{status_marker}"
+            if attrs.get("status") == "LIAR": role_info = " [🤥 ЛЖЕЦ]"
+            return f"<b>{p.name}</b> — {prof}, {trait}{role_info}{status_marker}"
 
         trait_part = f", {trait}" if vis_rules.get("show_trait", False) else ""
-        return f"<b>{p.name}</b> - {prof}{trait_part}{status_marker}"
+        return f"<b>{p.name}</b> — {prof}{trait_part}{status_marker}"
 
     @staticmethod
     def generate_dashboard(topic: str, round_num: int, phase: str, players: List[BasePlayer]) -> str:
@@ -118,3 +112,26 @@ class BunkerUtils:
             f"<blockquote>{topic}</blockquote>\n\n"
             f"👥 <b>ВЫЖИВШИЕ:</b>\n{list_str}"
         )
+
+    # === НОВЫЙ МЕТОД ===
+    @staticmethod
+    def generate_game_report(players: List[BasePlayer], result_text: str) -> str:
+        """Генерирует финальный отчет со вскрытием всех ролей"""
+        report = f"{result_text}\n\n<b>📝 РАСКРЫТИЕ КАРТ:</b>\n"
+
+        survivors = [p for p in players if p.is_alive]
+        dead = [p for p in players if not p.is_alive]
+
+        if survivors:
+            report += "\n🏆 <b>ВЫЖИЛИ:</b>\n"
+            for p in survivors:
+                report += f"- {BunkerUtils.get_display_name(p, 999, reveal_all=True)}\n"
+        else:
+            report += "\n☠️ <b>ВЫЖИВШИХ НЕТ.</b>\n"
+
+        if dead:
+            report += "\n💀 <b>ПОГИБЛИ:</b>\n"
+            for p in dead:
+                report += f"- {BunkerUtils.get_display_name(p, 999, reveal_all=True)}\n"
+
+        return report

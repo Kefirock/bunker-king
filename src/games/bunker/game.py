@@ -30,8 +30,6 @@ class BunkerGame(GameEngine):
         self.players = BunkerUtils.generate_initial_players(users_data)
 
         catastrophe = random.choice(bunker_cfg.scenarios["catastrophes"])
-
-        # Глобальная тема для дашборда (общая)
         topic = self._get_global_topic(1, catastrophe)
 
         self.state = BaseGameState(
@@ -81,8 +79,6 @@ class BunkerGame(GameEngine):
             return await self._next_phase()
 
         current_player = active_list[self.current_turn_index]
-
-        # Генерируем персональную тему для игрока
         personal_topic = self._get_personal_topic(current_player)
 
         # ХОД ЧЕЛОВЕКА
@@ -117,27 +113,19 @@ class BunkerGame(GameEngine):
         if not bot: return []
 
         events = []
-
-        # Подменяем тему в state на персональную, чтобы бот понимал свою задачу
         personal_topic = self._get_personal_topic(bot)
 
-        # Создаем временную копию состояния для агентов
-        # (глубокое копирование словаря shared_data, чтобы не сломать глобальный стейт)
         temp_shared = self.state.shared_data.copy()
         temp_shared["topic"] = personal_topic
-
         temp_state = self.state.model_copy()
         temp_state.shared_data = temp_shared
 
-        # Вызываем агентов с temp_state
         instr = await self.director_agent.get_hidden_instruction(
             bot, self.players, temp_state, logger=self.logger
         )
-
         speech = await self.bot_agent.make_turn(
             bot, self.players, temp_state, instr, logger=self.logger
         )
-
         await self.judge_agent.analyze_move(
             bot, speech, personal_topic, logger=self.logger
         )
@@ -181,7 +169,6 @@ class BunkerGame(GameEngine):
 
         self.state.history.append(f"[{player.name}]: {text}")
 
-        # Судья тоже должен знать персональную тему игрока (чтобы проверить, раскрыл ли он черту)
         personal_topic = self._get_personal_topic(player)
         await self.judge_agent.analyze_move(player, text, personal_topic, logger=self.logger)
 
@@ -234,12 +221,13 @@ class BunkerGame(GameEngine):
         target_survivors = bunker_cfg.gameplay["rounds"]["target_survivors"]
 
         if not humans_alive:
-            events.append(GameEvent(type="game_over", content="💀 Все люди покинули бункер. GAME OVER."))
+            report = BunkerUtils.generate_game_report(self.players, "💀 Все люди покинули бункер. GAME OVER.")
+            events.append(GameEvent(type="game_over", content=report))
             return events
 
         if len(survivors) <= target_survivors:
-            events.append(GameEvent(type="game_over",
-                                    content=f"🎉 <b>ПОБЕДА!</b> (Техническая)\nВыжили: {', '.join([p.name for p in survivors])}"))
+            report = BunkerUtils.generate_game_report(self.players, "🎉 <b>ПОБЕДА!</b> Бункер укомплектован.")
+            events.append(GameEvent(type="game_over", content=report))
             return events
 
         dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
@@ -249,7 +237,6 @@ class BunkerGame(GameEngine):
         if self.state.phase == "voting":
             if player.name in self.votes:
                 del self.votes[player.name]
-
             alive_count = len(survivors)
             if len(self.votes) >= alive_count:
                 res = await self._finish_voting()
@@ -262,12 +249,10 @@ class BunkerGame(GameEngine):
     # --- Внутренние методы ---
 
     def _get_global_topic(self, round_num: int, catastrophe: dict) -> str:
-        """Общая тема для дашборда"""
         topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
         if round_num == 1:
             return topics_cfg[1]
         elif round_num == 2:
-            # Для дашборда используем заглушку "Твоя черта"
             return topics_cfg[2].format(trait="Твоя черта")
         else:
             idx = (round_num - 3) % len(catastrophe["topics"])
@@ -275,14 +260,10 @@ class BunkerGame(GameEngine):
             return topics_cfg[3].format(catastrophe_problem=problem)
 
     def _get_personal_topic(self, player: BasePlayer) -> str:
-        """Персональная тема для игрока"""
         if self.state.round == 2 and self.state.phase == "presentation":
-            # Подставляем реальную черту игрока
             topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
             real_trait = player.attributes.get("trait", "???")
             return topics_cfg[2].format(trait=real_trait)
-
-        # В остальных случаях тема общая
         return self.state.shared_data["topic"]
 
     async def _next_phase(self) -> List[GameEvent]:
@@ -369,7 +350,8 @@ class BunkerGame(GameEngine):
 
         if len(leaders) > 1:
             if self.state.shared_data["runoff_count"] >= 1:
-                events.append(GameEvent(type="game_over", content="Ничья дважды. Бункер закрыт."))
+                report = BunkerUtils.generate_game_report(self.players, "⚖️ Ничья дважды. Бункер закрыт.")
+                events.append(GameEvent(type="game_over", content=report))
                 return events
 
             self.state.phase = "runoff"
@@ -396,12 +378,13 @@ class BunkerGame(GameEngine):
         target_survivors = bunker_cfg.gameplay["rounds"]["target_survivors"]
 
         if not humans_alive:
-            events.append(GameEvent(type="game_over", content="💀 Все люди погибли. GAME OVER."))
+            report = BunkerUtils.generate_game_report(self.players, "💀 Все люди погибли. GAME OVER.")
+            events.append(GameEvent(type="game_over", content=report))
             return events
 
         if len(survivors) <= target_survivors:
-            events.append(GameEvent(type="game_over",
-                                    content=f"🎉 <b>ПОБЕДА!</b> Выжили: {', '.join([p.name for p in survivors])}"))
+            report = BunkerUtils.generate_game_report(self.players, "🎉 <b>ПОБЕДА!</b> Бункер укомплектован.")
+            events.append(GameEvent(type="game_over", content=report))
             return events
 
         self.state.round += 1
@@ -415,7 +398,7 @@ class BunkerGame(GameEngine):
         new_topic = self._get_global_topic(self.state.round, cat)
         self.state.shared_data["topic"] = f"Раунд {self.state.round}: {new_topic}"
 
-        events.append(GameEvent(type="message", content=f"🔥 <b>РАУНД {self.state.round}</b>\nТема: {new_topic}"))
+        events.append(GameEvent(type="message", content=f"🔥 <b>РАУНД {self.state.round}</b>"))
         events.append(GameEvent(type="switch_turn"))
         return events
 

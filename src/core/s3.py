@@ -12,6 +12,7 @@ class S3Uploader:
         self.bucket_name = os.getenv("S3_BUCKET_NAME")
         self.s3_client = None
 
+        # Инициализация только если есть ключи
         if all([self.endpoint, self.access_key, self.secret_key, self.bucket_name]):
             try:
                 self.s3_client = boto3.client(
@@ -24,13 +25,20 @@ class S3Uploader:
             except Exception as e:
                 print(f"❌ Failed to initialize S3: {e}")
         else:
-            print("⚠️ S3 Env variables missing. Uploading disabled.")
+            print("⚠️ S3 Env variables missing. Logging will be local only.")
 
     def upload_session_folder(self, local_folder_path: str):
         """
         Загружает содержимое папки сессии в S3 и удаляет локальную папку.
         """
-        if not self.s3_client or not os.path.exists(local_folder_path):
+        # Если клиента нет или папки нет - просто удаляем локально (чтобы не забивать диск)
+        if not os.path.exists(local_folder_path):
+            return
+
+        if not self.s3_client:
+            try:
+                shutil.rmtree(local_folder_path)
+            except: pass
             return
 
         folder_name = os.path.basename(local_folder_path)
@@ -40,7 +48,6 @@ class S3Uploader:
         for root, dirs, files in os.walk(local_folder_path):
             for filename in files:
                 local_path = os.path.join(root, filename)
-                # Ключ в S3: FolderName/FileName
                 s3_key = f"{folder_name}/{filename}"
 
                 try:

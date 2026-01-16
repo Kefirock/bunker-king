@@ -23,7 +23,9 @@ class DirectorAgent:
         max_score = 0
 
         for p in all_players:
+            # Игнорируем себя и МЕРТВЫХ
             if p.name == current_player.name: continue
+            if not p.is_alive: continue
 
             # Сумма факторов опасности
             score = sum(p.attributes.get("active_factors", {}).values())

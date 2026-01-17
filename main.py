@@ -4,6 +4,7 @@ import os
 import sys
 import random
 import time
+from typing import Union
 
 print("🔍 DEBUG: SERVER STARTUP")
 
@@ -128,7 +129,7 @@ async def broadcast_lobby_ui(lobby: Lobby):
             asyncio.create_task(broadcast_lobby_ui(lobby))
 
 
-# === EVENT PROCESSOR (FINAL ROUTING FIX) ===
+# === EVENT PROCESSOR ===
 
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
@@ -138,7 +139,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
     for event in events:
         try:
             if event.type in ["message", "bot_think"]:
-                # Статус тайпинга только живым
                 targets = [p.id for p in game.players if p.is_human and p.is_alive]
                 for tid in targets:
                     if tid > 0:
@@ -148,12 +148,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                             pass
 
             if event.type == "message":
-                # Если target_ids пуст -> шлем всем ЖИВЫМ людям
-                if not event.target_ids:
-                    targets = [p.id for p in game.players if p.is_human and p.is_alive]
-                else:
-                    targets = event.target_ids
-
+                targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 kb = None
                 if event.reply_markup:
                     builder = InlineKeyboardBuilder()
@@ -163,7 +158,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     kb = builder.as_markup()
 
                 for tid in targets:
-                    # 1. Реальный игрок
                     if tid > 0:
                         sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
@@ -178,14 +172,9 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                         if event.token:
                             message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
 
-                    # 2. Фейковый игрок
                     elif tid <= -50000 and ADMIN_ID:
                         fake_p = next((p for p in game.players if p.id == tid), None)
-                        if fake_p:  # Если игрок найден
-                            # Проверяем, жив ли фейк. Если мертв - не шлем (чтобы не спамить админу)
-                            if not fake_p.is_alive and "GAME OVER" not in event.content:
-                                continue
-
+                        if fake_p and fake_p.is_alive:
                             fake_name = fake_p.name
                             debug_text = f"🔧 <b>[To {fake_name}]</b>:\n{event.content}"
                             try:
@@ -194,8 +183,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                                 pass
 
             elif event.type == "edit_message":
-                targets = event.target_ids if event.target_ids else [p.id for p in game.players if
-                                                                     p.is_human and p.is_alive]
+                targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 for tid in targets:
                     if tid < 0: continue
                     msg_id = message_tokens.get(f"{tid}:{event.token}")
@@ -221,7 +209,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                                                     text=event.content)
 
             elif event.type == "game_over":
-                # Game Over шлем всем, даже мертвым
                 targets = [p.id for p in game.players if p.is_human]
                 for tid in targets:
                     if tid > 0: await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
@@ -274,53 +261,33 @@ async def cmd_fake_join(message: Message, command: CommandObject):
     await message.reply(f"🤖 Фейк <b>{fake_name}</b> добавлен.")
     await broadcast_lobby_ui(lobby)
 
+
 @router.message(Command("fake_say"))
 async def cmd_fake_say(message: Message, command: CommandObject):
     user_id = message.from_user.id
-
-    # Проверка прав с выводом
-    if not ADMIN_ID or user_id != ADMIN_ID:
-        await message.reply("⛔ Нет прав админа.")
-        return
+    if not ADMIN_ID or user_id != ADMIN_ID: return
 
     lid = lobby_manager.user_to_lobby.get(user_id)
-    if not lid or lid not in active_games:
-        await message.reply("⚠️ Вы не в активной игре.")
-        return
+    if not lid or lid not in active_games: return
 
     game = active_games[lid]
     text = command.args
-    if not text:
-        await message.reply("⚠️ Текст сообщения пуст.")
-        return
+    if not text: return
 
-    # Определяем, чей ход
     active_list = [p for p in game.players if p.is_alive]
     if game.state.phase == "runoff":
         active_list = [p for p in active_list if p.name in game.state.shared_data.get("runoff_candidates", [])]
 
-    if game.current_turn_index >= len(active_list):
-        await message.reply("⏳ Идет смена фазы, подождите...")
-        return
-
+    if game.current_turn_index >= len(active_list): return
     current_player = active_list[game.current_turn_index]
 
-    # Разрешаем говорить ТОЛЬКО если это фейк (ID < 0)
-    # Если это реальный игрок, админ не должен за него говорить (это нарушает целостность)
-    # Но если очень хочется для теста - можно убрать проверку.
     if current_player.id > 0:
-        await message.reply(f"🚫 Сейчас ход реального игрока: <b>{current_player.name}</b> (ID {current_player.id}).")
+        await message.reply(f"Сейчас ход реального игрока {current_player.name}.")
         return
 
-    # Пробуем отправить
     events = await game.process_message(player_id=current_player.id, text=text)
+    await process_game_events(game.lobby_id, events)
 
-    if not events:
-        await message.reply("⚠️ Движок игры не вернул событий. Возможно, ошибка очередности.")
-    else:
-        # Успех
-        await message.answer(f"✅ Отправлено за <b>{current_player.name}</b>: {text}")
-        await process_game_events(game.lobby_id, events)
 
 @router.message(Command("kick"))
 async def cmd_kick(message: Message, command: CommandObject):
@@ -466,23 +433,50 @@ async def back_to_menu_handler(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("lobby_join_"))
 async def lobby_join_btn_handler(callback: CallbackQuery):
     lobby_id = callback.data.split("_")[2]
-    await join_lobby_logic(callback.message, lobby_id)
+    # ВАЖНОЕ ИСПРАВЛЕНИЕ: Передаем САМ callback, а не callback.message
+    await join_lobby_logic(callback, lobby_id)
 
 
-async def join_lobby_logic(message: Message, lobby_id: str):
-    user = message.from_user
+async def join_lobby_logic(event: Union[Message, CallbackQuery], lobby_id: str):
+    """
+    Универсальная функция входа.
+    event: Message (если ссылка) или CallbackQuery (если кнопка)
+    """
+    user = event.from_user
+
+    # Определяем chat_id и message_id для обновления UI
+    chat_id = 0
+    message_id = 0
+    is_callback = isinstance(event, CallbackQuery)
+
+    if is_callback:
+        chat_id = event.message.chat.id
+        message_id = event.message.message_id
+    else:
+        chat_id = event.chat.id
+
     lobby_manager.leave_lobby(user.id)
     success = lobby_manager.join_lobby(lobby_id, user.id, user.first_name)
+
     if success:
         lobby = lobby_manager.get_lobby(lobby_id)
-        if isinstance(message, Message) and not message.from_user.is_bot:
-            msg = await message.answer("Подключение...")
-            lobby.user_interfaces[user.id] = msg.message_id
-        else:
-            lobby.user_interfaces[user.id] = message.message_id
+
+        # Если это было по ссылке, нужно отправить новое сообщение
+        if not is_callback:
+            msg = await bot.send_message(chat_id, "Подключение к лобби...")
+            message_id = msg.message_id
+
+        # Регистрируем/обновляем интерфейс пользователя
+        lobby.user_interfaces[user.id] = message_id
+
+        # Бродкаст обновит меню у всех (включая только что вошедшего)
         await broadcast_lobby_ui(lobby)
     else:
-        await message.answer("❌ Лобби не найдено.")
+        error_text = "❌ Лобби не найдено или игра уже идет."
+        if is_callback:
+            await bot.send_message(chat_id, error_text)  # Или alert
+        else:
+            await event.answer(error_text)
 
 
 @router.callback_query(F.data == "lobby_leave")

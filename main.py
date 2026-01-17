@@ -4,7 +4,6 @@ import os
 import sys
 import random
 import time
-from typing import Union
 
 print("🔍 DEBUG: SERVER STARTUP")
 
@@ -213,9 +212,12 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                 for tid in targets:
                     if tid > 0: await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
 
+                # --- S3 UPLOAD FIX ---
                 if hasattr(game, "logger") and game.logger:
-                    path = game.logger.get_session_path()
-                    asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, path))
+                    local_path = game.logger.get_session_path()
+                    s3_path = game.logger.get_s3_target_path()  # Получаем красивый путь
+                    asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path))
+                # ---------------------
 
                 if game.lobby_id in active_games: del active_games[game.lobby_id]
                 if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
@@ -235,7 +237,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             logging.error(f"Event Error ({event.type}): {e}")
 
 
-# === ADMIN COMMANDS ===
+# === COMMANDS ===
 
 @router.message(Command("fake_join"))
 async def cmd_fake_join(message: Message, command: CommandObject):
@@ -384,7 +386,9 @@ async def start_bunker_handler(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     user = callback.from_user
     lid = str(chat_id)
-    game = BunkerGame(lobby_id=lid)
+
+    # ПЕРЕДАЕМ ИМЯ ХОСТА
+    game = BunkerGame(lobby_id=lid, host_name=user.first_name)
     active_games[lid] = game
     lobby_manager.leave_lobby(user.id)
 
@@ -433,57 +437,38 @@ async def back_to_menu_handler(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("lobby_join_"))
 async def lobby_join_btn_handler(callback: CallbackQuery):
     lobby_id = callback.data.split("_")[2]
-    # ВАЖНОЕ ИСПРАВЛЕНИЕ: Передаем САМ callback, а не callback.message
     await join_lobby_logic(callback, lobby_id)
 
 
 async def join_lobby_logic(event: Union[Message, CallbackQuery], lobby_id: str):
-    """
-    Универсальная функция входа.
-    event: Message (если ссылка) или CallbackQuery (если кнопка)
-    """
     user = event.from_user
-
-    # Определяем chat_id и message_id для обновления UI
-    chat_id = 0
-    message_id = 0
     is_callback = isinstance(event, CallbackQuery)
-
-    if is_callback:
-        chat_id = event.message.chat.id
-        message_id = event.message.message_id
-    else:
-        chat_id = event.chat.id
+    chat_id = event.message.chat.id if is_callback else event.chat.id
+    message_id = event.message.message_id if is_callback else 0
 
     lobby_manager.leave_lobby(user.id)
     success = lobby_manager.join_lobby(lobby_id, user.id, user.first_name)
 
     if success:
         lobby = lobby_manager.get_lobby(lobby_id)
-
-        # Если это было по ссылке, нужно отправить новое сообщение
         if not is_callback:
-            msg = await bot.send_message(chat_id, "Подключение к лобби...")
+            msg = await bot.send_message(chat_id, "Подключение...")
             message_id = msg.message_id
 
-        # Регистрируем/обновляем интерфейс пользователя
         lobby.user_interfaces[user.id] = message_id
-
-        # Бродкаст обновит меню у всех (включая только что вошедшего)
         await broadcast_lobby_ui(lobby)
     else:
-        error_text = "❌ Лобби не найдено или игра уже идет."
+        text = "❌ Лобби не найдено."
         if is_callback:
-            await bot.send_message(chat_id, error_text)  # Или alert
+            await bot.send_message(chat_id, text)
         else:
-            await event.answer(error_text)
+            await event.answer(text)
 
 
 @router.callback_query(F.data == "lobby_leave")
 async def lobby_leave_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     lid = lobby_manager.user_to_lobby.get(user_id)
-
     if lid and lid in active_games:
         game = active_games[lid]
         game_events = await game.player_leave(user_id)
@@ -512,7 +497,9 @@ async def lobby_start_handler(callback: CallbackQuery):
     lobby.status = "playing"
     await callback.message.edit_text(f"🚀 <b>ИГРА ЗАПУЩЕНА!</b>")
 
-    game = BunkerGame(lobby_id=lobby_id)
+    # ПЕРЕДАЕМ ИМЯ ХОСТА
+    host_name = lobby.players[lobby.host_id]['name']
+    game = BunkerGame(lobby_id=lobby_id, host_name=host_name)
     active_games[lobby_id] = game
 
     users_data = lobby.to_game_users_list()

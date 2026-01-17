@@ -15,9 +15,10 @@ from src.games.bunker.logic.director_agent import DirectorAgent
 
 
 class BunkerGame(GameEngine):
-    def __init__(self, lobby_id: str):
-        super().__init__(lobby_id)
-        self.logger = SessionLogger("Bunker", lobby_id)
+    def __init__(self, lobby_id: str, host_name: str):
+        super().__init__(lobby_id, host_name)
+        # Передаем имя хоста в логгер
+        self.logger = SessionLogger("Bunker", lobby_id, host_name)
 
         self.bot_agent = BotAgent()
         self.judge_agent = JudgeAgent()
@@ -237,6 +238,7 @@ class BunkerGame(GameEngine):
         if self.state.phase == "voting":
             if player.name in self.votes:
                 del self.votes[player.name]
+
             alive_count = len(survivors)
             if len(self.votes) >= alive_count:
                 res = await self._finish_voting()
@@ -275,11 +277,8 @@ class BunkerGame(GameEngine):
             dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
                                                   [p for p in self.players if p.is_alive])
             events.append(GameEvent(type="update_dashboard", content=dash))
-
-            # --- ОБНОВЛЕННЫЙ ТЕКСТ ДЛЯ ФАЗЫ ОБСУЖДЕНИЯ ---
             events.append(GameEvent(type="message",
                                     content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nГлавный вопрос: <b>Против кого вы голосуете?</b>\nНазывайте имена."))
-
             events.append(GameEvent(type="switch_turn"))
 
         elif self.state.phase in ["discussion", "runoff"]:

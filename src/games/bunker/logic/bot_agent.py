@@ -6,6 +6,54 @@ from src.core.schemas import BasePlayer, BaseGameState
 from src.games.bunker.config import bunker_cfg
 from src.games.bunker.utils import BunkerUtils
 
+# === ХАРДКОД ШАБЛОНА (ДЛЯ НАДЕЖНОСТИ) ===
+# Используем {{ и }} для JSON, чтобы .format() не ломался.
+BOT_SYSTEM_PROMPT_TEMPLATE = """
+ТЫ — {name}. НЕ ИИ, НЕ Языковая Модель. Ты — живой персонаж.
+Роль: {profession}. Черта: {trait} (Скрыта от других, если ты сам не сказал).
+Характер: {personality}
+
+ТЕКУЩАЯ СИТУАЦИЯ:
+Тема раунда: {topic}
+Фаза: {phase}
+
+ДРУГИЕ ВЫЖИВШИЕ:
+{public_profiles}
+
+ТВОЕ ПОСЛЕДНЕЕ СЛОВО:
+"{my_last_speech}"
+
+ИСТОРИЯ ЧАТА (Последние сообщения):
+{memory}
+
+{target_instruction}
+
+ПРАВИЛА ОТЫГРЫША:
+1. ГОВОРИ ТОЛЬКО ОТ ПЕРВОГО ЛИЦА ("Я считаю...", "Я думаю..."). 
+2. ЗАПРЕЩЕНО писать "{name} делает..." или "{name} говорит...". Ты и есть {name}.
+3. Если твой Внутренний Анализ указывает на угрозу — атакуй или защищайся.
+4. Будь краток, естественен и эмоционален.
+5. Соблюдай лимит слов: от {min_words} до {max_words}.
+
+ТВОЯ ЗАДАЧА:
+1. Проанализируй ситуацию.
+2. Выбери НАМЕРЕНИЕ (INTENT).
+3. Сгенерируй речь.
+
+ОТВЕТЬ В JSON:
+{{
+  "thought": "Твои мысли (Internal monologue)...",
+  "intent": "ATTACK/DEFEND/SUPPORT/INQUIRE",
+  "attack_target": "Имя игрока, которого ты атакуешь (или null, если никого)",
+  "speech": "Твоя прямая речь в чат..."
+}}
+
+ДОПОЛНИТЕЛЬНАЯ ЗАДАЧА ТЕКУЩЕЙ ФАЗЫ:
+{phase_task}
+
+{director_order}
+"""
+
 
 class BotAgent:
     async def make_turn(self,
@@ -36,7 +84,6 @@ class BotAgent:
                 prof = p.attributes.get('profession', '???')
                 trait = p.attributes.get('trait', '???') if vis_rules.get('show_trait') else "???"
 
-                # Добавляем резюме последнего действия от Судьи
                 last_act = p.attributes.get("last_action_desc", "")
                 action_info = f" (Last action: {last_act})" if last_act else ""
 
@@ -72,23 +119,10 @@ class BotAgent:
             phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go. Be aggressive."
 
         # 3. СБОРКА ПРОМПТА
-        # !!! ИСПРАВЛЕНИЕ ТУТ: Двойные фигурные скобки {{ и }}
-        json_format = """
-        {{
-          "thought": "Internal monologue...",
-          "intent": "ATTACK/DEFEND/SUPPORT/INQUIRE",
-          "attack_target": "Name of the player you are attacking/suspecting (OR null if none)",
-          "speech": "Your message to the chat..."
-        }}
-        """
+        # Используем хардкодный шаблон, чтобы не было ошибок форматирования
+        director_order_str = f"!!! DIRECTOR ORDER: {director_instruction} !!!" if director_instruction else ""
 
-        template = bunker_cfg.prompts["bot_player"]["system"]
-        # Заменяем старую инструкцию JSON на новую
-        template = template.replace(
-            '{\n  "thought": "Твой внутренний анализ...",\n  "intent": "ОДНО_СЛОВО",\n  "speech": "Твоя прямая речь..."\n}',
-            json_format)
-
-        full_prompt = template.format(
+        full_prompt = BOT_SYSTEM_PROMPT_TEMPLATE.format(
             name=bot.name,
             profession=attrs.get("profession"),
             trait=attrs.get("trait"),
@@ -99,15 +133,11 @@ class BotAgent:
             my_last_speech="...",
             memory="\n".join(state.history[-10:]),
             target_instruction="",
-            attack_threshold=gameplay["bots"]["thresholds"]["attack"],
             min_words=gameplay["bots"]["word_limits"]["min"],
-            max_words=gameplay["bots"]["word_limits"]["max"]
+            max_words=gameplay["bots"]["word_limits"]["max"],
+            phase_task=phase_task,
+            director_order=director_order_str
         )
-
-        full_prompt += f"\n\nCURRENT OBJECTIVE: {phase_task}"
-
-        if director_instruction:
-            full_prompt += f"\n!!! DIRECTOR ORDER: {director_instruction} !!!"
 
         bot_models = core_cfg.models["player_models"]
         model = random.choice(bot_models)
@@ -149,7 +179,6 @@ class BotAgent:
         for target in valid_targets:
             score, reasons = self._calculate_threat(bot, target)
 
-            # Бонус за последовательность
             if current_enemy_name and target.name == current_enemy_name:
                 score += 150
                 reasons.append(f"PUBLIC_ENEMY (I attacked {target.name})")

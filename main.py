@@ -4,6 +4,7 @@ import os
 import sys
 import random
 import time
+from typing import Union  # <--- ДОБАВЛЕН ЭТОТ ИМПОРТ
 
 print("🔍 DEBUG: SERVER STARTUP")
 
@@ -128,7 +129,7 @@ async def broadcast_lobby_ui(lobby: Lobby):
             asyncio.create_task(broadcast_lobby_ui(lobby))
 
 
-# === EVENT PROCESSOR ===
+# === EVENT PROCESSOR (ROUTING) ===
 
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
@@ -157,6 +158,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     kb = builder.as_markup()
 
                 for tid in targets:
+                    # 1. Реальный игрок
                     if tid > 0:
                         sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
@@ -171,6 +173,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                         if event.token:
                             message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
 
+                    # 2. Фейковый игрок -> Шлем Админу
                     elif tid <= -50000 and ADMIN_ID:
                         fake_p = next((p for p in game.players if p.id == tid), None)
                         if fake_p and fake_p.is_alive:
@@ -212,12 +215,11 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                 for tid in targets:
                     if tid > 0: await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
 
-                # --- S3 UPLOAD FIX ---
+                # S3 Upload
                 if hasattr(game, "logger") and game.logger:
                     local_path = game.logger.get_session_path()
-                    s3_path = game.logger.get_s3_target_path()  # Получаем красивый путь
+                    s3_path = game.logger.get_s3_target_path()
                     asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path))
-                # ---------------------
 
                 if game.lobby_id in active_games: del active_games[game.lobby_id]
                 if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
@@ -237,7 +239,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             logging.error(f"Event Error ({event.type}): {e}")
 
 
-# === COMMANDS ===
+# === ADMIN DEBUG COMMANDS ===
 
 @router.message(Command("fake_join"))
 async def cmd_fake_join(message: Message, command: CommandObject):
@@ -386,8 +388,6 @@ async def start_bunker_handler(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     user = callback.from_user
     lid = str(chat_id)
-
-    # ПЕРЕДАЕМ ИМЯ ХОСТА
     game = BunkerGame(lobby_id=lid, host_name=user.first_name)
     active_games[lid] = game
     lobby_manager.leave_lobby(user.id)
@@ -437,14 +437,21 @@ async def back_to_menu_handler(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("lobby_join_"))
 async def lobby_join_btn_handler(callback: CallbackQuery):
     lobby_id = callback.data.split("_")[2]
+    # ВАЖНО: передаем сам callback
     await join_lobby_logic(callback, lobby_id)
 
 
 async def join_lobby_logic(event: Union[Message, CallbackQuery], lobby_id: str):
     user = event.from_user
+
+    # Определяем chat_id для отправки сообщений
     is_callback = isinstance(event, CallbackQuery)
-    chat_id = event.message.chat.id if is_callback else event.chat.id
-    message_id = event.message.message_id if is_callback else 0
+    if is_callback:
+        chat_id = event.message.chat.id
+        message_id = event.message.message_id
+    else:
+        chat_id = event.chat.id
+        message_id = 0  # Будем слать новое
 
     lobby_manager.leave_lobby(user.id)
     success = lobby_manager.join_lobby(lobby_id, user.id, user.first_name)
@@ -497,7 +504,6 @@ async def lobby_start_handler(callback: CallbackQuery):
     lobby.status = "playing"
     await callback.message.edit_text(f"🚀 <b>ИГРА ЗАПУЩЕНА!</b>")
 
-    # ПЕРЕДАЕМ ИМЯ ХОСТА
     host_name = lobby.players[lobby.host_id]['name']
     game = BunkerGame(lobby_id=lobby_id, host_name=host_name)
     active_games[lobby_id] = game

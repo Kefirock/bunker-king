@@ -72,14 +72,14 @@ class BotAgent:
             phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go. Be aggressive."
 
         # 3. СБОРКА ПРОМПТА
-        # Мы обновляем шаблон JSON, требуя указать цель атаки
+        # !!! ИСПРАВЛЕНИЕ ТУТ: Двойные фигурные скобки {{ и }}
         json_format = """
-        {
+        {{
           "thought": "Internal monologue...",
           "intent": "ATTACK/DEFEND/SUPPORT/INQUIRE",
           "attack_target": "Name of the player you are attacking/suspecting (OR null if none)",
           "speech": "Your message to the chat..."
-        }
+        }}
         """
 
         template = bunker_cfg.prompts["bot_player"]["system"]
@@ -127,7 +127,6 @@ class BotAgent:
         # --- ЛОГИКА ПАМЯТИ ВРАГА ---
         target_name = decision.get("attack_target")
         if target_name and isinstance(target_name, str) and target_name.lower() != "null":
-            # Ищем точное совпадение имени среди игроков
             found_enemy = next((p.name for p in all_players if p.name.lower() in target_name.lower()), None)
             if found_enemy:
                 bot.attributes["current_enemy"] = found_enemy
@@ -145,17 +144,15 @@ class BotAgent:
         scored_targets = []
         threat_text = ""
 
-        # Кого мы ненавидим в данный момент?
         current_enemy_name = bot.attributes.get("current_enemy")
 
         for target in valid_targets:
             score, reasons = self._calculate_threat(bot, target)
 
-            # --- БОНУС ЗА ПОСЛЕДОВАТЕЛЬНОСТЬ ---
+            # Бонус за последовательность
             if current_enemy_name and target.name == current_enemy_name:
-                score += 150  # Огромный вес, чтобы подтвердить свои слова делом
+                score += 150
                 reasons.append(f"PUBLIC_ENEMY (I attacked {target.name})")
-            # -----------------------------------
 
             status = target.attributes.get("status")
             if status == "LIAR":
@@ -174,11 +171,9 @@ class BotAgent:
 
         scored_targets.sort(key=lambda x: x[1], reverse=True)
 
-        # Если есть явный лидер по угрозе (>100), голосуем без вопросов
         if scored_targets and scored_targets[0][1] > 100:
             return scored_targets[0][0].name
 
-        # Иначе спрашиваем LLM (для нюансов)
         template = bunker_cfg.prompts["bot_player"]["voting_user"]
         prompt = template.format(
             name=bot.name,

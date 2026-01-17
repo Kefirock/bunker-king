@@ -275,8 +275,11 @@ class BunkerGame(GameEngine):
             dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
                                                   [p for p in self.players if p.is_alive])
             events.append(GameEvent(type="update_dashboard", content=dash))
-            events.append(
-                GameEvent(type="message", content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nКритика, споры и поиск слабого звена."))
+
+            # --- ОБНОВЛЕННЫЙ ТЕКСТ ДЛЯ ФАЗЫ ОБСУЖДЕНИЯ ---
+            events.append(GameEvent(type="message",
+                                    content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nГлавный вопрос: <b>Против кого вы голосуете?</b>\nНазывайте имена."))
+
             events.append(GameEvent(type="switch_turn"))
 
         elif self.state.phase in ["discussion", "runoff"]:

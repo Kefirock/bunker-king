@@ -18,14 +18,12 @@ class BotAgent:
         attrs = bot.attributes
         gameplay = bunker_cfg.gameplay
 
-        # 1. УМНЫЙ КОНТЕКСТ (Кого мы видим?)
-        # Формируем список с пометками для LLM
+        # 1. УМНЫЙ КОНТЕКСТ
         players_desc_list = []
         for p in all_players:
             status_tags = []
             if not p.is_alive: status_tags.append("DEAD")
 
-            # Если игрок жив, показываем его данные
             if p.is_alive:
                 if p.attributes.get("status") == "LIAR": status_tags.append("LIAR")
                 if p.attributes.get("status") == "SUSPICIOUS": status_tags.append("SUSPICIOUS")
@@ -37,12 +35,11 @@ class BotAgent:
                 tags_str = f"[{', '.join(status_tags)}]" if status_tags else ""
                 players_desc_list.append(f"- {p.name}: {prof}, {trait} {tags_str}")
             else:
-                # Мертвых показываем кратко, чтобы бот знал, что они выбыли
                 players_desc_list.append(f"- {p.name}: [ELIMINATED/DEAD]")
 
         public_info_str = "\n".join(players_desc_list)
 
-        # 2. ОПРЕДЕЛЕНИЕ ЗАДАЧИ (Что говорить?)
+        # 2. ОПРЕДЕЛЕНИЕ ЗАДАЧИ
         phase_task = "Speak naturally."
         if state.phase == "presentation":
             if state.round == 1:
@@ -51,8 +48,16 @@ class BotAgent:
                 phase_task = "TASK: Reveal your TRAIT. Explain why it is not a problem or how it helps."
             else:
                 phase_task = "TASK: Propose a solution to the catastrophe problem based on your skills."
+
         elif state.phase == "discussion":
-            phase_task = "TASK: Debate phase. Attack suspicious players, defend yourself, or build alliances. Do NOT introduce yourself again."
+            # --- ЖЕСТКИЙ АКЦЕНТ НА ГОЛОСОВАНИИ ---
+            phase_task = (
+                "TASK: DISCUSSION PHASE. YOUR PRIMARY GOAL is to state WHO you are voting against and WHY.\n"
+                "1. Pick a target from the list (someone useless, suspicious, or a liar).\n"
+                "2. Say: 'I am voting against [Name] because...'.\n"
+                "3. You can briefly defend yourself or agree with others, but the ACCENT must be on attacking your target."
+            )
+
         elif state.phase == "runoff":
             opponent = next((n for n in state.shared_data["runoff_candidates"] if n != bot.name), "opponent")
             phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go. Be aggressive."
@@ -75,7 +80,6 @@ class BotAgent:
             max_words=gameplay["bots"]["word_limits"]["max"]
         )
 
-        # Добавляем жесткую инструкцию фазы в конец, чтобы она имела приоритет
         full_prompt += f"\n\nCURRENT OBJECTIVE: {phase_task}"
 
         if director_instruction:
@@ -101,16 +105,13 @@ class BotAgent:
         valid_targets = [p for p in candidates if p.name != bot.name and p.is_alive]
         if not valid_targets: return ""
 
-        # Авто-голос в дуэли (если всего 1 враг)
         if len(valid_targets) == 1:
             return valid_targets[0].name
 
-        # Расчет угроз
         scored_targets = []
         threat_text = ""
         for target in valid_targets:
             score, reasons = self._calculate_threat(bot, target)
-            # Бонус к угрозе, если Лжец
             if target.attributes.get("status") == "LIAR":
                 score += 50
                 reasons.append("LIAR")

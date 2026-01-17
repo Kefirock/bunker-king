@@ -17,7 +17,6 @@ from src.games.bunker.logic.director_agent import DirectorAgent
 class BunkerGame(GameEngine):
     def __init__(self, lobby_id: str, host_name: str):
         super().__init__(lobby_id, host_name)
-        # Передаем имя хоста в логгер
         self.logger = SessionLogger("Bunker", lobby_id, host_name)
 
         self.bot_agent = BotAgent()
@@ -127,17 +126,17 @@ class BunkerGame(GameEngine):
         speech = await self.bot_agent.make_turn(
             bot, self.players, temp_state, instr, logger=self.logger
         )
+
+        # UPD: Передаем round_num
         await self.judge_agent.analyze_move(
-            bot, speech, personal_topic, logger=self.logger
+            bot, speech, personal_topic, self.state.round, logger=self.logger
         )
 
         self.state.history.append(f"[{bot.name}]: {speech}")
 
-        status_icon = ""
-        if bot.attributes.get("status") == "LIAR": status_icon = " [🤥 ЛЖЕЦ]"
-
+        # UPD: Убрали визуальный статус [ЛЖЕЦ]
         display_name = BunkerUtils.get_display_name(bot, self.state.round)
-        final_msg = f"{display_name}{status_icon}:\n{speech}"
+        final_msg = f"{display_name}:\n{speech}"
 
         events.append(GameEvent(type="edit_message", content=final_msg, token=token))
 
@@ -171,7 +170,9 @@ class BunkerGame(GameEngine):
         self.state.history.append(f"[{player.name}]: {text}")
 
         personal_topic = self._get_personal_topic(player)
-        await self.judge_agent.analyze_move(player, text, personal_topic, logger=self.logger)
+
+        # UPD: Передаем round_num
+        await self.judge_agent.analyze_move(player, text, personal_topic, self.state.round, logger=self.logger)
 
         display_name = BunkerUtils.get_display_name(player, self.state.round)
         msg = f"{display_name}:\n{text}"

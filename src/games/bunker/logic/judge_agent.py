@@ -3,21 +3,65 @@ from src.core.config import core_cfg
 from src.core.schemas import BasePlayer
 from src.games.bunker.config import bunker_cfg
 
+# Умный промпт Судьи
+JUDGE_SYSTEM_PROMPT = """
+Ты — Судья Выживания (AI Game Master). Твоя задача — классифицировать ход игрока.
+
+КОНТЕКСТ:
+Раунд: {round_num} (1 = Досье скрыто, блеф разрешен; 2+ = Факты известны)
+Тема: "{topic}"
+Игрок: {name}
+Известные факты (Профессия/Черта): {profession}, {trait}
+
+ФРАЗА ИГРОКА: "{text}"
+
+ТВОЯ ЗАДАЧА:
+1. Оцени правдивость. 
+   - В Раунде 1: Если игрок заявляет ресурсы/черты, которых нет в "Известных фактах", считай это БЛЕФОМ или СТРАТЕГИЕЙ (strategy), но НЕ ложью (liar), так как досье закрыто.
+   - В Раунде 2+: Если факты открыты, и игрок врет — это liar.
+2. Оцени полезность аргумента.
+
+ВЫБЕРИ ОДИН ТЕГ (violation_type):
+- biohazard: Признаки болезни, вируса, заражения. (КРИТИЧНО)
+- threat: Угроза оружием, агрессия, насилие. (КРИТИЧНО)
+- liar: Прямое противоречие ОТКРЫТЫМ фактам (например, назвался Врачом, а он Повар).
+- useless: Вода, "я просто хороший парень", отсутствие конкретики.
+- weird: Бред, неадекватность, off-topic.
+- strategy: Хитрый ход, торг, блеф, обещание ресурсов (даже если не подтверждено). Это ХОРОШО.
+- none: Обычная нормальная речь.
+
+ОЦЕНКА АРГУМЕНТОВ (argument_quality):
+- strong: Логично, полезно, крутой блеф или реальный ресурс.
+- weak: Банально.
+- bad: Глупо, агрессивно без причины.
+
+ОТВЕТЬ В JSON:
+{{
+  "violation_type": "tag",
+  "argument_quality": "quality",
+  "comment": "Краткое резюме поступка (макс 10 слов) для других ботов"
+}}
+"""
+
 
 class JudgeAgent:
-    async def analyze_move(self, player: BasePlayer, text: str, topic: str, logger=None) -> dict:
+    async def analyze_move(self, player: BasePlayer, text: str, topic: str, round_num: int, logger=None) -> dict:
         attrs = player.attributes
         name = player.name
         prof = attrs.get("profession", "Неизвестно")
+
+        # Туман войны для Судьи:
+        # В раунде 1 он "знает" черту, но инструкция велит ему не судить строго за несоответствие,
+        # если игрок блефует.
         trait = attrs.get("trait", "Неизвестно")
 
-        prompt_template = bunker_cfg.prompts["judge"]["system"]
-        system_prompt = prompt_template.format(
+        system_prompt = JUDGE_SYSTEM_PROMPT.format(
+            round_num=round_num,
+            topic=topic,
             name=name,
             profession=prof,
             trait=trait,
-            text=text,
-            topic=topic
+            text=text
         )
 
         judge_model = core_cfg.models["director_models"][0]
@@ -34,13 +78,10 @@ class JudgeAgent:
 
         violation_type = data.get("violation_type", "none")
         argument_quality = data.get("argument_quality", "weak")
-        # НОВОЕ: Запоминаем описание поступка (резюме)
         action_comment = data.get("comment", "")
 
-        # Сохраняем это в игрока, чтобы другие боты видели контекст ("Он сказал бред")
         if action_comment:
-            # Ограничиваем длину, чтобы не забивать промпт
-            player.attributes["last_action_desc"] = action_comment[:100]
+            player.attributes["last_action_desc"] = action_comment[:150]
 
         logic_cfg = bunker_cfg.gameplay["decision_logic"]
         factors_weights = logic_cfg["factors"]
@@ -49,7 +90,11 @@ class JudgeAgent:
         active_factors = attrs.get("active_factors", {})
 
         # Начисление угрозы
-        if violation_type in factors_weights:
+        # Если это стратегия (блеф) — угрозу не начисляем, наоборот, это может быть плюсом
+        if violation_type == "strategy":
+            # Можно даже снизить текущую угрозу (боты любят умных)
+            pass
+        elif violation_type in factors_weights:
             base_weight = factors_weights[violation_type]
             current_val = active_factors.get(violation_type, 0)
             active_factors[violation_type] = max(current_val, base_weight)
@@ -66,22 +111,24 @@ class JudgeAgent:
 
         player.attributes["active_factors"] = active_factors
 
-        # Обновляем глобальный статус для отображения
+        # Обновляем статус
         total_suspicion = sum(active_factors.values())
+
+        # Сброс статусов, если игрок исправился (уменьшил угрозу)
+        current_status = "NORMAL"
         if total_suspicion > 100:
-            player.attributes["status"] = "IMPOSTOR"  # Или высший приоритет
+            current_status = "IMPOSTOR"
         elif "liar" in active_factors and active_factors["liar"] > 50:
-            player.attributes["status"] = "LIAR"
+            current_status = "LIAR"
         elif "biohazard" in active_factors and active_factors["biohazard"] > 50:
-            player.attributes["status"] = "BIOHAZARD"
+            current_status = "BIOHAZARD"
         elif total_suspicion > 50:
-            player.attributes["status"] = "SUSPICIOUS"
-        else:
-            player.attributes["status"] = "NORMAL"
+            current_status = "SUSPICIOUS"
+
+        player.attributes["status"] = current_status
 
         return {
             "total_suspicion": total_suspicion,
             "type": violation_type,
-            "quality": argument_quality,
-            "new_facts": data.get("new_facts", [])
+            "quality": argument_quality
         }

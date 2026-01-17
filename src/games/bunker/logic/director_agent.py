@@ -5,6 +5,35 @@ from src.core.config import core_cfg
 from src.core.schemas import BasePlayer, BaseGameState
 from src.games.bunker.config import bunker_cfg
 
+# Новый, умный промпт Режиссера
+DIRECTOR_SYSTEM_PROMPT = """
+Ты — Режиссер психологического триллера "Бункер". Твоя цель — создавать драму, напряжение и интересные сюжетные повороты.
+
+ТЕКУЩИЙ ИГРОК: {player_name} ({player_prof})
+ХАРАКТЕР: {player_behavior}
+ФАЗА ИГРЫ: {phase}
+ТЕМА: {topic}
+
+ПОДОЗРИТЕЛЬНЫЕ ЦЕЛИ (Кого можно атаковать):
+{targets_list}
+
+ИСТОРИЯ ЧАТА (Последние реплики):
+{history}
+
+ТВОЯ ЗАДАЧА:
+Дай ОДНО короткое (макс 15 слов) скрытое указание игроку {player_name}.
+Не используй всегда "Атакуй". Выбирай стратегию в зависимости от характера игрока:
+
+1. PROVOKE (Провокация): Если игрок агрессивен, натрави его на подозрительную цель.
+2. ALLY (Альянс): Если игрок слаб или паникер, прикажи ему искать защиты у сильного.
+3. DOUBT (Сомнение): Посей зерно сомнения насчет честности лидера или самого активного игрока.
+4. DEFLECT (Отвод глаз): Если сам игрок под ударом, прикажи ему перевести тему.
+
+ВАЖНО:
+- Указание должно быть скрытым мотивом ("Спроси, откуда у него еда", а не "Скажи: откуда еда").
+- Учитывай характер: Моралиста проси давить на совесть, Прагматика — на выгоду.
+"""
+
 
 class DirectorAgent:
     def __init__(self):
@@ -18,62 +47,55 @@ class DirectorAgent:
                                      state: BaseGameState,
                                      logger=None) -> str:
 
-        # Ищем самую подозрительную цель
-        suspicious_target = None
-        max_score = 0
+        # 1. Шанс вмешательства
+        # В фазе обсуждения вмешиваемся чаще
+        chance = self.inject_chance
+        if state.phase == "discussion": chance += 0.3
+        if state.phase == "runoff": chance = 1.0  # В дуэли всегда даем советы
 
+        if random.random() > chance:
+            return ""
+
+        # 2. Сбор данных
+        # Ищем потенциальные цели для атаки (Лжецы, Бесполезные, или просто враги)
+        suspicious_targets = []
         for p in all_players:
-            # Игнорируем себя и МЕРТВЫХ
             if p.name == current_player.name: continue
             if not p.is_alive: continue
 
-            # Сумма факторов опасности
-            score = sum(p.attributes.get("active_factors", {}).values())
+            # Проверяем статусы
             status = p.attributes.get("status", "NORMAL")
+            score = sum(p.attributes.get("active_factors", {}).values())
 
-            if score > 15 or status in ["SUSPICIOUS", "LIAR"]:
-                if score > max_score:
-                    max_score = score
-                    suspicious_target = p
+            # Добавляем в список целей, если есть за что зацепиться
+            if status in ["LIAR", "BIOHAZARD", "IMPOSTOR"] or score > 30:
+                reason = status if status != "NORMAL" else "Suspicious"
+                suspicious_targets.append(f"{p.name} ({reason})")
 
-        # Рандомный шанс вмешательства
-        should_inject = False
-        if suspicious_target:
-            should_inject = True
-        else:
-            chance = self.inject_chance * (self.chaos_level / 5.0)
-            if state.phase == "discussion": chance += 0.2
-            if random.random() < chance:
-                should_inject = True
+        targets_str = ", ".join(suspicious_targets) if suspicious_targets else "Нет явных врагов. Создай интригу."
 
-        if not should_inject:
-            return ""
+        # Берем поведение из профиля (оно появилось в Итерации 2)
+        player_behavior = current_player.attributes.get("personality", {}).get("behavior", "Act normally.")
 
-        # Генерация инструкции
-        model = core_cfg.models["director_models"][0]
-        history_snippet = "\n".join(state.history[-5:])
-
-        target_context = ""
-        if suspicious_target:
-            target_context = (
-                f"\nВНИМАНИЕ: Игрок {suspicious_target.name} подозрителен "
-                f"(Уровень: {max_score}). Направь агрессию на него."
-            )
-
-        prompt = (
-            f"Ты — Режиссер. Игра 'Бункер'. Тема: {state.shared_data.get('topic')}\n"
-            f"Фаза: {state.phase}\n"
-            f"Ходит: {current_player.name} ({current_player.attributes.get('profession')}).\n"
-            f"История:\n{history_snippet}\n"
-            f"{target_context}\n\n"
-            f"Дай ОДНО скрытое указание игроку {current_player.name} (макс 15 слов). "
-            "Цель: конфликт или устранение слабых."
+        # 3. Формирование промпта
+        prompt = DIRECTOR_SYSTEM_PROMPT.format(
+            player_name=current_player.name,
+            player_prof=current_player.attributes.get("profession", "Survivor"),
+            player_behavior=player_behavior,
+            phase=state.phase,
+            topic=state.shared_data.get("topic", "Survival"),
+            targets_list=targets_str,
+            history="\n".join(state.history[-5:])
         )
+
+        # 4. Запрос к LLM
+        model = core_cfg.models["director_models"][0]
 
         instruction = await llm_client.generate(
             model_config=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
+            temperature=0.9,  # Высокая температура для креативности
             logger=logger
         )
+
         return instruction.strip()

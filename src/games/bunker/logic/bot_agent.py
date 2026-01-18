@@ -6,7 +6,7 @@ from src.core.schemas import BasePlayer, BaseGameState
 from src.games.bunker.config import bunker_cfg
 from src.games.bunker.utils import BunkerUtils
 
-# === ШАБЛОН С КОНТЕКСТОМ КАТАСТРОФЫ ===
+# === ОБНОВЛЕННЫЙ ШАБЛОН ===
 BOT_SYSTEM_PROMPT_TEMPLATE = """
 ТЫ — {name}. НЕ ИИ, НЕ Языковая Модель. Ты — живой персонаж.
 Роль: {profession}. Черта: {trait} (Скрыта от других, если ты сам не сказал).
@@ -37,6 +37,7 @@ BOT_SYSTEM_PROMPT_TEMPLATE = """
 1. ГОВОРИ ТОЛЬКО ОТ ПЕРВОГО ЛИЦА.
 2. Будь краток, естественен и эмоционален.
 3. Соблюдай лимит слов: от {min_words} до {max_words}.
+4. ИГНОРИРУЙ МЕРТВЫХ. Если игрок помечен в списке как [ELIMINATED] или в истории как [DEAD], не обращайся к нему. Для тебя он перестал существовать.
 
 ТВОЯ ЗАДАЧА:
 1. Проанализируй ситуацию.
@@ -79,9 +80,11 @@ class BotAgent:
             if not p.is_alive: status_tags.append("DEAD")
 
             if p.is_alive:
+                # Статусы от судьи
                 if p.attributes.get("status") in ["LIAR", "SUSPICIOUS", "BIOHAZARD", "IMPOSTOR"]:
                     status_tags.append(p.attributes.get("status"))
 
+                # Факторы угрозы
                 active_factors = p.attributes.get("active_factors", {})
                 for k, v in active_factors.items():
                     if v > 40: status_tags.append(k.upper())
@@ -117,12 +120,13 @@ class BotAgent:
                 "TASK: DISCUSSION PHASE. Attack suspicious players or defend yourself.\n"
                 "CRITICAL RULES:\n"
                 "1. DO NOT introduce yourself again.\n"
-                "2. Focus on OTHERS: Who is useless for survival in this catastrophe? Call them out."
+                "2. Focus on OTHERS: Who is lying? Who is useless? Call them out by name.\n"
+                "3. Focus on LIVING players only."
             )
 
         elif state.phase == "runoff":
             opponent = next((n for n in state.shared_data["runoff_candidates"] if n != bot.name), "opponent")
-            phase_task = f"TASK: DUEL! Prove why YOU are essential for '{cat_name}' and {opponent} is not."
+            phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go."
 
         # 3. СБОРКА ПРОМПТА
         director_order_str = f"!!! DIRECTOR ORDER: {director_instruction} !!!" if director_instruction else ""
@@ -134,7 +138,7 @@ class BotAgent:
             trait=attrs.get("trait"),
             personality=attrs.get("personality", {}).get("description", "Normal"),
             behavior_prompt=behavior_prompt,
-            global_context=cat_desc,  # Вставляем описание катастрофы
+            global_context=cat_desc,
             topic=state.shared_data.get("topic"),
             phase=state.phase,
             public_profiles=public_info_str,
@@ -167,7 +171,8 @@ class BotAgent:
         intent = decision.get("intent", "NONE")
 
         if target_name and isinstance(target_name, str) and target_name.lower() != "null":
-            target_player = next((p for p in all_players if p.name.lower() in target_name.lower()), None)
+            # Ищем цель среди ЖИВЫХ игроков
+            target_player = next((p for p in all_players if p.name.lower() in target_name.lower() and p.is_alive), None)
 
             if target_player:
                 if intent == "ATTACK":

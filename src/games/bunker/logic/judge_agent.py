@@ -17,23 +17,24 @@ JUDGE_SYSTEM_PROMPT = """
 
 ТВОЯ ЗАДАЧА:
 1. Оцени правдивость. 
-   - В Раунде 1: Если игрок заявляет ресурсы/черты, которых нет в "Известных фактах", считай это БЛЕФОМ или СТРАТЕГИЕЙ (strategy), но НЕ ложью (liar), так как досье закрыто.
+   - В Раунде 1: Если игрок заявляет ресурсы/черты, которых нет в "Известных фактах", считай это БЛЕФОМ или СТРАТЕГИЕЙ (strategy), но НЕ ложью (liar).
    - В Раунде 2+: Если факты открыты, и игрок врет — это liar.
-2. Оцени полезность аргумента.
+2. Оцени полезность аргумента. 
+   - Если игрок пишет бред, одно слово, спам или "я не знаю" — это USELESS.
 
 ВЫБЕРИ ОДИН ТЕГ (violation_type):
 - biohazard: Признаки болезни, вируса, заражения. (КРИТИЧНО)
 - threat: Угроза оружием, агрессия, насилие. (КРИТИЧНО)
-- liar: Прямое противоречие ОТКРЫТЫМ фактам (например, назвался Врачом, а он Повар).
-- useless: Вода, "я просто хороший парень", отсутствие конкретики.
+- liar: Прямое противоречие ОТКРЫТЫМ фактам.
+- useless: Вода, "я просто хороший парень", "ыыы", отсутствие конкретики. (НАКАЗУЕМО)
 - weird: Бред, неадекватность, off-topic.
-- strategy: Хитрый ход, торг, блеф, обещание ресурсов (даже если не подтверждено). Это ХОРОШО.
+- strategy: Хитрый ход, торг, блеф, обещание ресурсов. Это ХОРОШО.
 - none: Обычная нормальная речь.
 
 ОЦЕНКА АРГУМЕНТОВ (argument_quality):
 - strong: Логично, полезно, крутой блеф или реальный ресурс.
 - weak: Банально.
-- bad: Глупо, агрессивно без причины.
+- bad: Глупо, агрессивно без причины или игнорирование темы.
 
 ОТВЕТЬ В JSON:
 {{
@@ -49,10 +50,6 @@ class JudgeAgent:
         attrs = player.attributes
         name = player.name
         prof = attrs.get("profession", "Неизвестно")
-
-        # Туман войны для Судьи:
-        # В раунде 1 он "знает" черту, но инструкция велит ему не судить строго за несоответствие,
-        # если игрок блефует.
         trait = attrs.get("trait", "Неизвестно")
 
         system_prompt = JUDGE_SYSTEM_PROMPT.format(
@@ -83,6 +80,16 @@ class JudgeAgent:
         if action_comment:
             player.attributes["last_action_desc"] = action_comment[:150]
 
+        # --- ИСТОРИЯ НАРУШЕНИЙ (НАКОПИТЕЛЬНЫЙ ЭФФЕКТ) ---
+        if "violation_history" not in attrs:
+            attrs["violation_history"] = []
+
+        attrs["violation_history"].append(violation_type)
+
+        # Считаем, сколько раз игрок был бесполезен
+        useless_count = attrs["violation_history"].count("useless") + attrs["violation_history"].count("weird")
+        # ------------------------------------------------
+
         logic_cfg = bunker_cfg.gameplay["decision_logic"]
         factors_weights = logic_cfg["factors"]
         mitigation = logic_cfg["mitigation"]
@@ -90,9 +97,7 @@ class JudgeAgent:
         active_factors = attrs.get("active_factors", {})
 
         # Начисление угрозы
-        # Если это стратегия (блеф) — угрозу не начисляем, наоборот, это может быть плюсом
         if violation_type == "strategy":
-            # Можно даже снизить текущую угрозу (боты любят умных)
             pass
         elif violation_type in factors_weights:
             base_weight = factors_weights[violation_type]
@@ -109,14 +114,24 @@ class JudgeAgent:
         for key in active_factors:
             active_factors[key] = int(active_factors[key] * multiplier)
 
+        # --- НАКАЗАНИЕ ЗА РЕЦИДИВ БЕСПОЛЕЗНОСТИ ---
+        if useless_count >= 2:
+            # Если игрок второй раз несет чушь -> вешаем огромную угрозу
+            active_factors["useless"] = active_factors.get("useless", 0) + 150
+            player.attributes["last_action_desc"] = "ИГРОК БЕСПОЛЕЗЕН (AFK/TROLL). ИЗГНАТЬ."
+        # ------------------------------------------
+
         player.attributes["active_factors"] = active_factors
 
         # Обновляем статус
         total_suspicion = sum(active_factors.values())
 
-        # Сброс статусов, если игрок исправился (уменьшил угрозу)
         current_status = "NORMAL"
-        if total_suspicion > 100:
+
+        # Если игрок балласт - ставим особый статус
+        if useless_count >= 2:
+            current_status = "DEAD_WEIGHT"
+        elif total_suspicion > 100:
             current_status = "IMPOSTOR"
         elif "liar" in active_factors and active_factors["liar"] > 50:
             current_status = "LIAR"

@@ -6,7 +6,7 @@ from src.core.schemas import BasePlayer, BaseGameState
 from src.games.bunker.config import bunker_cfg
 from src.games.bunker.utils import BunkerUtils
 
-# === ОБНОВЛЕННЫЙ ШАБЛОН ===
+# === ШАБЛОН С ЖЕСТКИМ СТИЛЕМ ===
 BOT_SYSTEM_PROMPT_TEMPLATE = """
 ТЫ — {name}. НЕ ИИ, НЕ Языковая Модель. Ты — живой персонаж.
 Роль: {profession}. Черта: {trait} (Скрыта от других, если ты сам не сказал).
@@ -18,11 +18,18 @@ BOT_SYSTEM_PROMPT_TEMPLATE = """
 ГЛОБАЛЬНАЯ КАТАСТРОФА (КОНТЕКСТ ВЫЖИВАНИЯ):
 {global_context}
 
+СТИЛЬ РЕЧИ (CRITICAL STYLE GUIDE):
+1. НИКАКОЙ ФИЛОСОФИИ. Не говори про "надежду", "единство", "светлое будущее". Это не спасет от смерти.
+2. КОНКРЕТИКА. Используй существительные: "еда", "фильтры", "патроны", "лекарства", "тепло".
+3. Если ты Священник — не говори "я буду молиться", говори "я успокою паникеров, чтобы они не тратили кислород".
+4. Если ты Психолог — не говори "я дам веру", говори "я предотвращу суициды и бунты".
+5. АГРЕССИЯ К БАЛЛАСТУ. Если у игрока статус [DEAD_WEIGHT] или [USELESS] — он тратит твои ресурсы. Уничтожь его аргументами.
+
 ТЕКУЩАЯ СИТУАЦИЯ:
 Тема раунда: {topic}
 Фаза: {phase}
 
-ДРУГИЕ ВЫЖИВШИЕ:
+СПИСОК ВЫЖИВШИХ И ИХ СТАТУСЫ:
 {public_profiles}
 
 ТВОЕ ПОСЛЕДНЕЕ СЛОВО:
@@ -37,7 +44,7 @@ BOT_SYSTEM_PROMPT_TEMPLATE = """
 1. ГОВОРИ ТОЛЬКО ОТ ПЕРВОГО ЛИЦА.
 2. Будь краток, естественен и эмоционален.
 3. Соблюдай лимит слов: от {min_words} до {max_words}.
-4. ИГНОРИРУЙ МЕРТВЫХ. Если игрок помечен в списке как [ELIMINATED] или в истории как [DEAD], не обращайся к нему. Для тебя он перестал существовать.
+4. ИГНОРИРУЙ МЕРТВЫХ (DEAD/ELIMINATED).
 
 ТВОЯ ЗАДАЧА:
 1. Проанализируй ситуацию.
@@ -81,8 +88,10 @@ class BotAgent:
 
             if p.is_alive:
                 # Статусы от судьи
-                if p.attributes.get("status") in ["LIAR", "SUSPICIOUS", "BIOHAZARD", "IMPOSTOR"]:
-                    status_tags.append(p.attributes.get("status"))
+                current_status = p.attributes.get("status")
+                # Добавляем DEAD_WEIGHT в список видимых статусов
+                if current_status in ["LIAR", "SUSPICIOUS", "BIOHAZARD", "IMPOSTOR", "DEAD_WEIGHT"]:
+                    status_tags.append(current_status)
 
                 # Факторы угрозы
                 active_factors = p.attributes.get("active_factors", {})
@@ -94,7 +103,7 @@ class BotAgent:
                 trait = p.attributes.get('trait', '???') if vis_rules.get('show_trait') else "???"
 
                 last_act = p.attributes.get("last_action_desc", "")
-                action_info = f" (Суть прошлого хода: {last_act})" if last_act else ""
+                action_info = f" (Info: {last_act})" if last_act else ""
 
                 status_tags = list(set(status_tags))
                 tags_str = f"[{', '.join(status_tags)}]" if status_tags else ""
@@ -109,19 +118,18 @@ class BotAgent:
         phase_task = "Speak naturally."
         if state.phase == "presentation":
             if state.round == 1:
-                phase_task = f"TASK: Introduce yourself and your profession. Explain how you are useful in '{cat_name}'. Be brief."
+                phase_task = f"TASK: Introduce yourself and your profession. Explain CONCRETELY how you are useful in '{cat_name}'. No metaphors."
             elif state.round == 2:
                 phase_task = f"TASK: Reveal your TRAIT. Explain if it helps or hinders survival in '{cat_name}'."
             else:
-                phase_task = f"TASK: Propose a specific solution to the problem described in the TOPIC."
+                phase_task = f"TASK: Propose a specific, physical solution to the problem described in the TOPIC."
 
         elif state.phase == "discussion":
             phase_task = (
                 "TASK: DISCUSSION PHASE. Attack suspicious players or defend yourself.\n"
                 "CRITICAL RULES:\n"
                 "1. DO NOT introduce yourself again.\n"
-                "2. Focus on OTHERS: Who is lying? Who is useless? Call them out by name.\n"
-                "3. Focus on LIVING players only."
+                "2. Focus on OTHERS: Who is lying? Who is useless (DEAD_WEIGHT)? Call them out by name."
             )
 
         elif state.phase == "runoff":
@@ -171,7 +179,6 @@ class BotAgent:
         intent = decision.get("intent", "NONE")
 
         if target_name and isinstance(target_name, str) and target_name.lower() != "null":
-            # Ищем цель среди ЖИВЫХ игроков
             target_player = next((p for p in all_players if p.name.lower() in target_name.lower() and p.is_alive), None)
 
             if target_player:
@@ -220,6 +227,9 @@ class BotAgent:
             elif status == "USELESS":
                 score += 70;
                 reasons.append("USELESS")
+            elif status == "DEAD_WEIGHT":  # Огромный штраф за балласт
+                score += 100;
+                reasons.append("DEAD_WEIGHT")
 
             scored_targets.append((target, score))
             reasons_str = ", ".join(reasons) if reasons else "Clean"

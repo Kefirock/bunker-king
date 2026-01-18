@@ -15,7 +15,7 @@ rounds:
 # --- ФАЗЫ ХОДА ---
 phases:
   presentation:
-    instruction: "Кратко презентуй себя. Твоя цель — доказать свою пользу в условиях ТЕКУЩЕЙ КАТАСТРОФЫ. Если твоя профессия не подходит (например, блогер в апокалипсис) — выкручивайся, придумывай нестандартное применение."
+    instruction: "Кратко презентуй себя. Твоя цель — доказать свою пользу в условиях ТЕКУЩЕЙ КАТАСТРОФЫ. Если твоя профессия не подходит — выкручивайся, придумывай нестандартное применение."
   discussion:
     instruction: "ФАЗА АТАКИ. Хватит вежливости. Назови имя игрока, которого нужно изгнать, и объясни почему. Пассивность будет наказана."
   runoff:
@@ -24,17 +24,18 @@ phases:
 # --- ЛОГИКА ПРИНЯТИЯ РЕШЕНИЙ ---
 decision_logic:
   factors:
-    biohazard: 100
-    threat: 80
-    liar: 60
-    useless: 80
-    weird: 60
-    lore_break: 50
+    biohazard: 100     # Вирус, болезнь
+    threat: 80         # Оружие, агрессия
+    liar: 60           # Доказанная ложь
+    # ИЗМЕНЕНИЯ ТУТ: Бесполезность теперь смертный грех
+    useless: 95        # Молчуны и "я не знаю" — первые кандидаты на вылет
+    weird: 85          # Бред и спам — вторые кандидаты
+    lore_break: 50     # Метагейминг
 
   mitigation:
-    strong_argument: 0.5
-    weak_argument: 0.9
-    bad_argument: 1.5
+    strong_argument: 0.5   # Снижает угрозу на 50%
+    weak_argument: 0.9     # Снижает на 10%
+    bad_argument: 2.0      # УДВАИВАЕТ угрозу (Глупость наказывается)
 
 # --- ПРАВИЛА ГОЛОСОВАНИЯ ---
 voting:
@@ -54,16 +55,16 @@ visibility:
 judge:
   strictness: 1.0
   status_thresholds:
-    suspicious: 20
+    suspicious: 30
     liar: 60
     impostor: 100
   weights:
     contradiction: 10
     lore_break: 15
     off_topic: 12
-    useless: 10
-    omission: 0
-    evasiveness: 5
+    useless: 20
+    omission: 10
+    evasiveness: 10
 
 # --- ПСИХОЛОГИЯ БОТОВ ---
 bots:

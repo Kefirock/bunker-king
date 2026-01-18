@@ -6,12 +6,15 @@ from src.core.schemas import BasePlayer, BaseGameState
 from src.games.bunker.config import bunker_cfg
 from src.games.bunker.utils import BunkerUtils
 
-# === ХАРДКОД ШАБЛОНА (ДЛЯ НАДЕЖНОСТИ) ===
-# Используем {{ и }} для JSON, чтобы .format() не ломался.
+# === ОБНОВЛЕННЫЙ ШАБЛОН ===
+# Добавлено поле {behavior_prompt}
 BOT_SYSTEM_PROMPT_TEMPLATE = """
 ТЫ — {name}. НЕ ИИ, НЕ Языковая Модель. Ты — живой персонаж.
 Роль: {profession}. Черта: {trait} (Скрыта от других, если ты сам не сказал).
 Характер: {personality}
+
+ПОВЕДЕНЧЕСКАЯ УСТАНОВКА (ТВОЙ СТИЛЬ):
+{behavior_prompt}
 
 ТЕКУЩАЯ СИТУАЦИЯ:
 Тема раунда: {topic}
@@ -29,11 +32,9 @@ BOT_SYSTEM_PROMPT_TEMPLATE = """
 {target_instruction}
 
 ПРАВИЛА ОТЫГРЫША:
-1. ГОВОРИ ТОЛЬКО ОТ ПЕРВОГО ЛИЦА ("Я считаю...", "Я думаю..."). 
-2. ЗАПРЕЩЕНО писать "{name} делает..." или "{name} говорит...". Ты и есть {name}.
-3. Если твой Внутренний Анализ указывает на угрозу — атакуй или защищайся.
-4. Будь краток, естественен и эмоционален.
-5. Соблюдай лимит слов: от {min_words} до {max_words}.
+1. ГОВОРИ ТОЛЬКО ОТ ПЕРВОГО ЛИЦА.
+2. Будь краток, естественен и эмоционален.
+3. Соблюдай лимит слов: от {min_words} до {max_words}.
 
 ТВОЯ ЗАДАЧА:
 1. Проанализируй ситуацию.
@@ -44,7 +45,7 @@ BOT_SYSTEM_PROMPT_TEMPLATE = """
 {{
   "thought": "Твои мысли (Internal monologue)...",
   "intent": "ATTACK/DEFEND/SUPPORT/INQUIRE",
-  "attack_target": "Имя игрока, которого ты атакуешь (или null, если никого)",
+  "attack_target": "Имя игрока, которого ты атакуешь/поддерживаешь (или null)",
   "speech": "Твоя прямая речь в чат..."
 }}
 
@@ -73,9 +74,11 @@ class BotAgent:
             if not p.is_alive: status_tags.append("DEAD")
 
             if p.is_alive:
+                # Статусы от судьи (внутренние, бот их видит, игроки - нет)
                 if p.attributes.get("status") in ["LIAR", "SUSPICIOUS", "BIOHAZARD", "IMPOSTOR"]:
                     status_tags.append(p.attributes.get("status"))
 
+                # Факторы угрозы
                 active_factors = p.attributes.get("active_factors", {})
                 for k, v in active_factors.items():
                     if v > 40: status_tags.append(k.upper())
@@ -85,7 +88,7 @@ class BotAgent:
                 trait = p.attributes.get('trait', '???') if vis_rules.get('show_trait') else "???"
 
                 last_act = p.attributes.get("last_action_desc", "")
-                action_info = f" (Last action: {last_act})" if last_act else ""
+                action_info = f" (Суть прошлого хода: {last_act})" if last_act else ""
 
                 status_tags = list(set(status_tags))
                 tags_str = f"[{', '.join(status_tags)}]" if status_tags else ""
@@ -100,11 +103,11 @@ class BotAgent:
         phase_task = "Speak naturally."
         if state.phase == "presentation":
             if state.round == 1:
-                phase_task = "TASK: Introduce yourself, state your profession. Prove you are useful. Be brief."
+                phase_task = "TASK: Introduce yourself. Prove you are useful. Be brief."
             elif state.round == 2:
                 phase_task = "TASK: Reveal your TRAIT. Explain why it is not a problem or how it helps."
             else:
-                phase_task = "TASK: Propose a solution to the catastrophe problem based on your skills."
+                phase_task = "TASK: Propose a solution to the catastrophe."
 
         elif state.phase == "discussion":
             phase_task = (
@@ -116,17 +119,20 @@ class BotAgent:
 
         elif state.phase == "runoff":
             opponent = next((n for n in state.shared_data["runoff_candidates"] if n != bot.name), "opponent")
-            phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go. Be aggressive."
+            phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go."
 
         # 3. СБОРКА ПРОМПТА
-        # Используем хардкодный шаблон, чтобы не было ошибок форматирования
         director_order_str = f"!!! DIRECTOR ORDER: {director_instruction} !!!" if director_instruction else ""
+
+        # Получаем уникальное поведение из конфига
+        behavior_prompt = attrs.get("personality", {}).get("behavior", "Act normally.")
 
         full_prompt = BOT_SYSTEM_PROMPT_TEMPLATE.format(
             name=bot.name,
             profession=attrs.get("profession"),
             trait=attrs.get("trait"),
             personality=attrs.get("personality", {}).get("description", "Normal"),
+            behavior_prompt=behavior_prompt,  # Вставляем инструкцию по поведению
             topic=state.shared_data.get("topic"),
             phase=state.phase,
             public_profiles=public_info_str,
@@ -154,15 +160,35 @@ class BotAgent:
 
         decision = llm_client.parse_json(response)
 
-        # --- ЛОГИКА ПАМЯТИ ВРАГА ---
+        # --- СОЦИАЛЬНАЯ ПАМЯТЬ ---
         target_name = decision.get("attack_target")
+        intent = decision.get("intent", "NONE")
+
         if target_name and isinstance(target_name, str) and target_name.lower() != "null":
-            found_enemy = next((p.name for p in all_players if p.name.lower() in target_name.lower()), None)
-            if found_enemy:
-                bot.attributes["current_enemy"] = found_enemy
+            # Ищем цель среди игроков
+            target_player = next((p for p in all_players if p.name.lower() in target_name.lower()), None)
+
+            if target_player:
+                # 1. Если я атакую - запоминаю как врага для голосования
+                if intent == "ATTACK":
+                    bot.attributes["current_enemy"] = target_player.name
+                    # 2. Записываем в память ЖЕРТВЕ, что я её атаковал (она запомнит меня как врага)
+                    self._update_memory(target_player, "attackers", bot.name)
+
+                # 3. Если поддерживаю - записываем в память ДРУГУ (он запомнит меня как союзника)
+                elif intent == "SUPPORT":
+                    self._update_memory(target_player, "supporters", bot.name)
         # ---------------------------
 
         return decision.get("speech", "...")
+
+    def _update_memory(self, player: BasePlayer, key: str, value: str):
+        """Добавляет имя в список attackers/supporters в атрибутах игрока"""
+        if "social_memory" not in player.attributes:
+            player.attributes["social_memory"] = {"attackers": [], "supporters": []}
+
+        if value not in player.attributes["social_memory"][key]:
+            player.attributes["social_memory"][key].append(value)
 
     async def make_vote(self, bot: BasePlayer, candidates: List[BasePlayer], state: BaseGameState, logger=None) -> str:
         valid_targets = [p for p in candidates if p.name != bot.name and p.is_alive]
@@ -174,24 +200,26 @@ class BotAgent:
         scored_targets = []
         threat_text = ""
 
+        # Кого я хейчу прямо сейчас?
         current_enemy_name = bot.attributes.get("current_enemy")
 
         for target in valid_targets:
             score, reasons = self._calculate_threat(bot, target)
 
+            # Бонус за последовательность (голосую за того, кого ругал)
             if current_enemy_name and target.name == current_enemy_name:
                 score += 150
-                reasons.append(f"PUBLIC_ENEMY (I attacked {target.name})")
+                reasons.append(f"MY_TARGET")
 
             status = target.attributes.get("status")
             if status == "LIAR":
-                score += 60
+                score += 60;
                 reasons.append("LIAR")
             elif status == "BIOHAZARD":
-                score += 80
+                score += 80;
                 reasons.append("BIOHAZARD")
             elif status == "USELESS":
-                score += 70
+                score += 70;
                 reasons.append("USELESS")
 
             scored_targets.append((target, score))
@@ -200,6 +228,7 @@ class BotAgent:
 
         scored_targets.sort(key=lambda x: x[1], reverse=True)
 
+        # Если есть явный враг (>100), голосуем без сомнений
         if scored_targets and scored_targets[0][1] > 100:
             return scored_targets[0][0].name
 
@@ -256,6 +285,7 @@ class BotAgent:
         my_mults = me.attributes.get("personality", {}).get("multipliers", {})
         target_factors = target.attributes.get("active_factors", {})
 
+        # Базовая угроза
         for factor, weight in target_factors.items():
             if weight <= 0: continue
             mult = my_mults.get(factor, 1.0)
@@ -263,5 +293,19 @@ class BotAgent:
             score += final_weight
             if final_weight > 20:
                 reasons.append(f"{factor.upper()}")
+
+        # --- СОЦИАЛЬНЫЙ ФАКТОР (ПАМЯТЬ) ---
+        # Проверяем память самого себя: кто МЕНЯ атаковал, кто МЕНЯ поддержал
+        my_memory = me.attributes.get("social_memory", {"attackers": [], "supporters": []})
+
+        # Если цель меня атаковала -> +50 угрозы (Месть)
+        if target.name in my_memory["attackers"]:
+            score += 50
+            reasons.append("ENEMY")
+
+        # Если цель меня поддерживала -> -30 угрозы (Дружба)
+        if target.name in my_memory["supporters"]:
+            score -= 30
+            reasons.append("ALLY")
 
         return score, reasons

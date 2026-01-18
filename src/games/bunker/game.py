@@ -79,11 +79,21 @@ class BunkerGame(GameEngine):
             return await self._next_phase()
 
         current_player = active_list[self.current_turn_index]
-        personal_topic = self._get_personal_topic(current_player)
 
         # ХОД ЧЕЛОВЕКА
         if current_player.is_human:
-            msg = f"👉 <b>ВАШ ХОД!</b>\nТема: {personal_topic}"
+            # --- ИСПРАВЛЕНИЕ UI ---
+            if self.state.phase == "presentation":
+                personal_topic = self._get_personal_topic(current_player)
+                msg = f"👉 <b>ВАШ ХОД!</b>\nТема: {personal_topic}"
+            elif self.state.phase == "discussion":
+                msg = f"👉 <b>ВАШ ХОД!</b>\nКого будем выгонять? Назови имя и причину."
+            elif self.state.phase == "runoff":
+                msg = f"👉 <b>ВАШ ХОД!</b>\nЭто дуэль. Защищайся или нападай!"
+            else:
+                msg = f"👉 <b>ВАШ ХОД!</b>"
+            # ----------------------
+
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
 
             others = [p.id for p in self.players if p.id != current_player.id]
@@ -120,26 +130,36 @@ class BunkerGame(GameEngine):
         temp_state = self.state.model_copy()
         temp_state.shared_data = temp_shared
 
-        instr = await self.director_agent.get_hidden_instruction(
-            bot, self.players, temp_state, logger=self.logger
-        )
-        speech = await self.bot_agent.make_turn(
-            bot, self.players, temp_state, instr, logger=self.logger
-        )
+        # FALLBACK ЗАЩИТА: Если LLM умрет, игра не зависнет
+        try:
+            instr = await self.director_agent.get_hidden_instruction(
+                bot, self.players, temp_state, logger=self.logger
+            )
 
-        # UPD: Передаем round_num
-        await self.judge_agent.analyze_move(
-            bot, speech, personal_topic, self.state.round, logger=self.logger
-        )
+            speech = await self.bot_agent.make_turn(
+                bot, self.players, temp_state, instr, logger=self.logger
+            )
 
-        self.state.history.append(f"[{bot.name}]: {speech}")
+            # Если речь пустая или сбой - ставим заглушку
+            if not speech or speech == "...":
+                speech = "*задумался и многозначительно промолчал*"
 
-        # UPD: Убрали визуальный статус [ЛЖЕЦ]
-        display_name = BunkerUtils.get_display_name(bot, self.state.round)
-        final_msg = f"{display_name}:\n{speech}"
+            await self.judge_agent.analyze_move(
+                bot, speech, personal_topic, self.state.round, logger=self.logger
+            )
 
-        events.append(GameEvent(type="edit_message", content=final_msg, token=token))
+            self.state.history.append(f"[{bot.name}]: {speech}")
 
+            display_name = BunkerUtils.get_display_name(bot, self.state.round)
+            final_msg = f"{display_name}:\n{speech}"  # Статусы [ЛЖЕЦ] убраны, как просили
+
+            events.append(GameEvent(type="edit_message", content=final_msg, token=token))
+
+        except Exception as e:
+            print(f"🔥 Critical Bot Error: {e}")
+            events.append(GameEvent(type="edit_message", content=f"⚠️ {bot.name} потерял связь.", token=token))
+
+        # Передача хода в любом случае
         self.current_turn_index += 1
         events.append(GameEvent(type="switch_turn"))
         return events
@@ -171,7 +191,7 @@ class BunkerGame(GameEngine):
 
         personal_topic = self._get_personal_topic(player)
 
-        # UPD: Передаем round_num
+        # Судья: анализ хода игрока
         await self.judge_agent.analyze_move(player, text, personal_topic, self.state.round, logger=self.logger)
 
         display_name = BunkerUtils.get_display_name(player, self.state.round)

@@ -230,12 +230,9 @@ class BunkerGame(GameEngine):
         if not player or not player.is_alive: return []
 
         player.is_alive = False
-
-        # --- МАРКИРУЕМ ИСТОРИЮ ---
         self._mark_dead_in_history(player.name)
-        # -------------------------
 
-        events.append(GameEvent(type="message", content=f"🚪 <b>{player.name}</b> покинул игру."))
+        events.append(GameEvent(type="message", content=f"🚪 <b>{player.name}</b> покинул игру (дезертировал)."))
 
         survivors = [p for p in self.players if p.is_alive]
         humans_alive = any(p.is_human for p in survivors)
@@ -270,10 +267,6 @@ class BunkerGame(GameEngine):
     # --- Внутренние методы ---
 
     def _mark_dead_in_history(self, player_name: str):
-        """
-        Переписывает историю чата, помечая реплики мертвого игрока тегом [DEAD].
-        Также добавляет системное сообщение о смерти.
-        """
         new_history = []
         prefix = f"[{player_name}]:"
         new_prefix = f"[{player_name} (DEAD)]:"
@@ -292,17 +285,20 @@ class BunkerGame(GameEngine):
         if round_num == 1:
             return topics_cfg[1].format(catastrophe=catastrophe["name"])
         elif round_num == 2:
-            return topics_cfg[2].format(trait="Твоя черта")
+            # FIX: Передаем catastrophe, так как в конфиге она есть в строке
+            return topics_cfg[2].format(trait="Твоя черта", catastrophe=catastrophe["name"])
         else:
             idx = (round_num - 3) % len(catastrophe["topics"])
             problem = catastrophe["topics"][idx]
             return topics_cfg[3].format(catastrophe_problem=problem)
 
     def _get_personal_topic(self, player: BasePlayer) -> str:
+        catastrophe = self.state.shared_data["catastrophe"]
         if self.state.round == 2 and self.state.phase == "presentation":
             topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
             real_trait = player.attributes.get("trait", "???")
-            return topics_cfg[2].format(trait=real_trait)
+            # FIX: Передаем catastrophe
+            return topics_cfg[2].format(trait=real_trait, catastrophe=catastrophe["name"])
         return self.state.shared_data["topic"]
 
     async def _next_phase(self) -> List[GameEvent]:
@@ -401,9 +397,7 @@ class BunkerGame(GameEngine):
 
         if eliminated:
             eliminated.is_alive = False
-            # --- МАРКИРУЕМ ИСТОРИЮ ---
             self._mark_dead_in_history(eliminated.name)
-            # -------------------------
             events.append(GameEvent(type="message", content=f"🚪 <b>{eliminated.name}</b> был изгнан."))
 
         survivors = [p for p in self.players if p.is_alive]

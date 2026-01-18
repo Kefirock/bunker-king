@@ -5,11 +5,14 @@ from typing import Dict, List, Optional
 
 
 class Lobby:
-    def __init__(self, lobby_id: str, host_id: int, host_name: str):
+    def __init__(self, lobby_id: str, host_id: int, host_name: str, game_type: str):
         self.lobby_id = lobby_id
         self.host_id = host_id
+        self.host_name = host_name
         self.status = "waiting"
-        self.game_type = "bunker"
+
+        # ТЕПЕРЬ ТИП ИГРЫ ДИНАМИЧЕСКИЙ
+        self.game_type = game_type
 
         # Тайм-аут: время последнего действия
         self.last_activity = time.time()
@@ -20,7 +23,7 @@ class Lobby:
 
         self.players: Dict[int, dict] = {}
 
-        # Добавляем хоста
+        # Добавляем хоста сразу
         self.add_player(host_id, host_name)
 
     def add_player(self, user_id: int, name: str):
@@ -55,9 +58,14 @@ class LobbyManager:
         self.lobbies: Dict[str, Lobby] = {}
         self.user_to_lobby: Dict[int, str] = {}
 
-    def create_lobby(self, host_id: int, host_name: str) -> Lobby:
+    # ДОБАВЛЕН АРГУМЕНТ game_type
+    def create_lobby(self, host_id: int, host_name: str, game_type: str) -> Lobby:
+        # Генерируем ID
         lid = ''.join(random.choices(string.ascii_uppercase, k=4))
-        lobby = Lobby(lid, host_id, host_name)
+        while lid in self.lobbies:
+            lid = ''.join(random.choices(string.ascii_uppercase, k=4))
+
+        lobby = Lobby(lid, host_id, host_name, game_type)
         self.lobbies[lid] = lobby
         self.user_to_lobby[host_id] = lid
         return lobby
@@ -65,8 +73,12 @@ class LobbyManager:
     def get_lobby(self, lobby_id: str) -> Optional[Lobby]:
         return self.lobbies.get(lobby_id)
 
-    def get_all_waiting(self) -> List[Lobby]:
-        return [l for l in self.lobbies.values() if l.status == "waiting"]
+    # ДОБАВЛЕН ФИЛЬТР ПО game_type
+    def get_all_waiting(self, game_type: Optional[str] = None) -> List[Lobby]:
+        result = [l for l in self.lobbies.values() if l.status == "waiting"]
+        if game_type:
+            result = [l for l in result if l.game_type == game_type]
+        return result
 
     def join_lobby(self, lobby_id: str, user_id: int, user_name: str) -> bool:
         lobby = self.get_lobby(lobby_id)

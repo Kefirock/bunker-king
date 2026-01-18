@@ -6,8 +6,7 @@ from src.core.schemas import BasePlayer, BaseGameState
 from src.games.bunker.config import bunker_cfg
 from src.games.bunker.utils import BunkerUtils
 
-# === ОБНОВЛЕННЫЙ ШАБЛОН ===
-# Добавлено поле {behavior_prompt}
+# === ШАБЛОН С КОНТЕКСТОМ КАТАСТРОФЫ ===
 BOT_SYSTEM_PROMPT_TEMPLATE = """
 ТЫ — {name}. НЕ ИИ, НЕ Языковая Модель. Ты — живой персонаж.
 Роль: {profession}. Черта: {trait} (Скрыта от других, если ты сам не сказал).
@@ -15,6 +14,9 @@ BOT_SYSTEM_PROMPT_TEMPLATE = """
 
 ПОВЕДЕНЧЕСКАЯ УСТАНОВКА (ТВОЙ СТИЛЬ):
 {behavior_prompt}
+
+ГЛОБАЛЬНАЯ КАТАСТРОФА (КОНТЕКСТ ВЫЖИВАНИЯ):
+{global_context}
 
 ТЕКУЩАЯ СИТУАЦИЯ:
 Тема раунда: {topic}
@@ -66,6 +68,9 @@ class BotAgent:
 
         attrs = bot.attributes
         gameplay = bunker_cfg.gameplay
+        catastrophe = state.shared_data.get("catastrophe", {})
+        cat_name = catastrophe.get("name", "Apocalypse")
+        cat_desc = catastrophe.get("description", "Survival situation.")
 
         # 1. УМНЫЙ КОНТЕКСТ
         players_desc_list = []
@@ -74,11 +79,9 @@ class BotAgent:
             if not p.is_alive: status_tags.append("DEAD")
 
             if p.is_alive:
-                # Статусы от судьи (внутренние, бот их видит, игроки - нет)
                 if p.attributes.get("status") in ["LIAR", "SUSPICIOUS", "BIOHAZARD", "IMPOSTOR"]:
                     status_tags.append(p.attributes.get("status"))
 
-                # Факторы угрозы
                 active_factors = p.attributes.get("active_factors", {})
                 for k, v in active_factors.items():
                     if v > 40: status_tags.append(k.upper())
@@ -103,28 +106,26 @@ class BotAgent:
         phase_task = "Speak naturally."
         if state.phase == "presentation":
             if state.round == 1:
-                phase_task = "TASK: Introduce yourself. Prove you are useful. Be brief."
+                phase_task = f"TASK: Introduce yourself and your profession. Explain how you are useful in '{cat_name}'. Be brief."
             elif state.round == 2:
-                phase_task = "TASK: Reveal your TRAIT. Explain why it is not a problem or how it helps."
+                phase_task = f"TASK: Reveal your TRAIT. Explain if it helps or hinders survival in '{cat_name}'."
             else:
-                phase_task = "TASK: Propose a solution to the catastrophe."
+                phase_task = f"TASK: Propose a specific solution to the problem described in the TOPIC."
 
         elif state.phase == "discussion":
             phase_task = (
                 "TASK: DISCUSSION PHASE. Attack suspicious players or defend yourself.\n"
                 "CRITICAL RULES:\n"
                 "1. DO NOT introduce yourself again.\n"
-                "2. Focus on OTHERS: Who is lying? Who is useless? Call them out by name."
+                "2. Focus on OTHERS: Who is useless for survival in this catastrophe? Call them out."
             )
 
         elif state.phase == "runoff":
             opponent = next((n for n in state.shared_data["runoff_candidates"] if n != bot.name), "opponent")
-            phase_task = f"TASK: DUEL! You are in danger. Prove why YOU should stay and {opponent} should go."
+            phase_task = f"TASK: DUEL! Prove why YOU are essential for '{cat_name}' and {opponent} is not."
 
         # 3. СБОРКА ПРОМПТА
         director_order_str = f"!!! DIRECTOR ORDER: {director_instruction} !!!" if director_instruction else ""
-
-        # Получаем уникальное поведение из конфига
         behavior_prompt = attrs.get("personality", {}).get("behavior", "Act normally.")
 
         full_prompt = BOT_SYSTEM_PROMPT_TEMPLATE.format(
@@ -132,7 +133,8 @@ class BotAgent:
             profession=attrs.get("profession"),
             trait=attrs.get("trait"),
             personality=attrs.get("personality", {}).get("description", "Normal"),
-            behavior_prompt=behavior_prompt,  # Вставляем инструкцию по поведению
+            behavior_prompt=behavior_prompt,
+            global_context=cat_desc,  # Вставляем описание катастрофы
             topic=state.shared_data.get("topic"),
             phase=state.phase,
             public_profiles=public_info_str,
@@ -165,17 +167,12 @@ class BotAgent:
         intent = decision.get("intent", "NONE")
 
         if target_name and isinstance(target_name, str) and target_name.lower() != "null":
-            # Ищем цель среди игроков
             target_player = next((p for p in all_players if p.name.lower() in target_name.lower()), None)
 
             if target_player:
-                # 1. Если я атакую - запоминаю как врага для голосования
                 if intent == "ATTACK":
                     bot.attributes["current_enemy"] = target_player.name
-                    # 2. Записываем в память ЖЕРТВЕ, что я её атаковал (она запомнит меня как врага)
                     self._update_memory(target_player, "attackers", bot.name)
-
-                # 3. Если поддерживаю - записываем в память ДРУГУ (он запомнит меня как союзника)
                 elif intent == "SUPPORT":
                     self._update_memory(target_player, "supporters", bot.name)
         # ---------------------------
@@ -183,7 +180,6 @@ class BotAgent:
         return decision.get("speech", "...")
 
     def _update_memory(self, player: BasePlayer, key: str, value: str):
-        """Добавляет имя в список attackers/supporters в атрибутах игрока"""
         if "social_memory" not in player.attributes:
             player.attributes["social_memory"] = {"attackers": [], "supporters": []}
 
@@ -200,13 +196,11 @@ class BotAgent:
         scored_targets = []
         threat_text = ""
 
-        # Кого я хейчу прямо сейчас?
         current_enemy_name = bot.attributes.get("current_enemy")
 
         for target in valid_targets:
             score, reasons = self._calculate_threat(bot, target)
 
-            # Бонус за последовательность (голосую за того, кого ругал)
             if current_enemy_name and target.name == current_enemy_name:
                 score += 150
                 reasons.append(f"MY_TARGET")
@@ -228,7 +222,6 @@ class BotAgent:
 
         scored_targets.sort(key=lambda x: x[1], reverse=True)
 
-        # Если есть явный враг (>100), голосуем без сомнений
         if scored_targets and scored_targets[0][1] > 100:
             return scored_targets[0][0].name
 
@@ -285,7 +278,6 @@ class BotAgent:
         my_mults = me.attributes.get("personality", {}).get("multipliers", {})
         target_factors = target.attributes.get("active_factors", {})
 
-        # Базовая угроза
         for factor, weight in target_factors.items():
             if weight <= 0: continue
             mult = my_mults.get(factor, 1.0)
@@ -294,16 +286,12 @@ class BotAgent:
             if final_weight > 20:
                 reasons.append(f"{factor.upper()}")
 
-        # --- СОЦИАЛЬНЫЙ ФАКТОР (ПАМЯТЬ) ---
-        # Проверяем память самого себя: кто МЕНЯ атаковал, кто МЕНЯ поддержал
         my_memory = me.attributes.get("social_memory", {"attackers": [], "supporters": []})
 
-        # Если цель меня атаковала -> +50 угрозы (Месть)
         if target.name in my_memory["attackers"]:
             score += 50
             reasons.append("ENEMY")
 
-        # Если цель меня поддерживала -> -30 угрозы (Дружба)
         if target.name in my_memory["supporters"]:
             score -= 30
             reasons.append("ALLY")

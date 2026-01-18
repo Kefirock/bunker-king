@@ -29,7 +29,10 @@ class BunkerGame(GameEngine):
     def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
         self.players = BunkerUtils.generate_initial_players(users_data)
 
+        # Выбираем сценарий катастрофы
         catastrophe = random.choice(bunker_cfg.scenarios["catastrophes"])
+
+        # Генерируем первую тему
         topic = self._get_global_topic(1, catastrophe)
 
         self.state = BaseGameState(
@@ -38,7 +41,7 @@ class BunkerGame(GameEngine):
             phase="presentation",
             shared_data={
                 "topic": topic,
-                "catastrophe": catastrophe,
+                "catastrophe": catastrophe,  # Храним полный объект с описанием и проблемами
                 "runoff_candidates": [],
                 "runoff_count": 0
             }
@@ -58,10 +61,12 @@ class BunkerGame(GameEngine):
                 dossier = (f"📂 <b>ТВОЕ ДОСЬЕ:</b>\n"
                            f"Роль: {p.attributes['profession']}\n"
                            f"Черта: {p.attributes['trait']}\n"
-                           f"Цель: Выжить.")
+                           f"Цель: Выжить любой ценой.")
                 events.append(GameEvent(type="message", target_ids=[p.id], content=dossier))
 
-        events.append(GameEvent(type="message", content="☢️ <b>ИГРА НАЧАЛАСЬ!</b>"))
+        # Сообщение о начале с названием катастрофы
+        cat_name = catastrophe["name"]
+        events.append(GameEvent(type="message", content=f"☢️ <b>ИГРА НАЧАЛАСЬ!</b>\nСценарий: <b>{cat_name}</b>"))
         return events
 
     # --- ЭТАП 1: ОБЪЯВЛЕНИЕ ХОДА ---
@@ -79,20 +84,19 @@ class BunkerGame(GameEngine):
             return await self._next_phase()
 
         current_player = active_list[self.current_turn_index]
+        personal_topic = self._get_personal_topic(current_player)
 
         # ХОД ЧЕЛОВЕКА
         if current_player.is_human:
-            # --- ИСПРАВЛЕНИЕ UI ---
+            # Адаптивный текст для разных фаз
             if self.state.phase == "presentation":
-                personal_topic = self._get_personal_topic(current_player)
-                msg = f"👉 <b>ВАШ ХОД!</b>\nТема: {personal_topic}"
+                msg = f"👉 <b>ВАШ ХОД!</b>\n{personal_topic}"
             elif self.state.phase == "discussion":
-                msg = f"👉 <b>ВАШ ХОД!</b>\nКого будем выгонять? Назови имя и причину."
+                msg = f"👉 <b>ВАШ ХОД!</b>\nКого выгнать и почему? Назовите имя."
             elif self.state.phase == "runoff":
-                msg = f"👉 <b>ВАШ ХОД!</b>\nЭто дуэль. Защищайся или нападай!"
+                msg = f"👉 <b>ВАШ ХОД!</b>\nЭто дуэль. Докажи, что ты полезнее врага!"
             else:
                 msg = f"👉 <b>ВАШ ХОД!</b>"
-            # ----------------------
 
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
 
@@ -123,6 +127,7 @@ class BunkerGame(GameEngine):
         if not bot: return []
 
         events = []
+        # Важно: используем персональную тему (с подставленной чертой), чтобы бот понимал задачу
         personal_topic = self._get_personal_topic(bot)
 
         temp_shared = self.state.shared_data.copy()
@@ -130,7 +135,6 @@ class BunkerGame(GameEngine):
         temp_state = self.state.model_copy()
         temp_state.shared_data = temp_shared
 
-        # FALLBACK ЗАЩИТА: Если LLM умрет, игра не зависнет
         try:
             instr = await self.director_agent.get_hidden_instruction(
                 bot, self.players, temp_state, logger=self.logger
@@ -140,9 +144,8 @@ class BunkerGame(GameEngine):
                 bot, self.players, temp_state, instr, logger=self.logger
             )
 
-            # Если речь пустая или сбой - ставим заглушку
             if not speech or speech == "...":
-                speech = "*задумался и многозначительно промолчал*"
+                speech = "*задумался и промолчал*"
 
             await self.judge_agent.analyze_move(
                 bot, speech, personal_topic, self.state.round, logger=self.logger
@@ -150,8 +153,9 @@ class BunkerGame(GameEngine):
 
             self.state.history.append(f"[{bot.name}]: {speech}")
 
+            # Статусы убраны из публичного чата
             display_name = BunkerUtils.get_display_name(bot, self.state.round)
-            final_msg = f"{display_name}:\n{speech}"  # Статусы [ЛЖЕЦ] убраны, как просили
+            final_msg = f"{display_name}:\n{speech}"
 
             events.append(GameEvent(type="edit_message", content=final_msg, token=token))
 
@@ -159,7 +163,6 @@ class BunkerGame(GameEngine):
             print(f"🔥 Critical Bot Error: {e}")
             events.append(GameEvent(type="edit_message", content=f"⚠️ {bot.name} потерял связь.", token=token))
 
-        # Передача хода в любом случае
         self.current_turn_index += 1
         events.append(GameEvent(type="switch_turn"))
         return events
@@ -190,8 +193,6 @@ class BunkerGame(GameEngine):
         self.state.history.append(f"[{player.name}]: {text}")
 
         personal_topic = self._get_personal_topic(player)
-
-        # Судья: анализ хода игрока
         await self.judge_agent.analyze_move(player, text, personal_topic, self.state.round, logger=self.logger)
 
         display_name = BunkerUtils.get_display_name(player, self.state.round)
@@ -236,14 +237,14 @@ class BunkerGame(GameEngine):
         if not player or not player.is_alive: return []
 
         player.is_alive = False
-        events.append(GameEvent(type="message", content=f"🚪 <b>{player.name}</b> покинул игру (дезертировал)."))
+        events.append(GameEvent(type="message", content=f"🚪 <b>{player.name}</b> покинул игру."))
 
         survivors = [p for p in self.players if p.is_alive]
         humans_alive = any(p.is_human for p in survivors)
         target_survivors = bunker_cfg.gameplay["rounds"]["target_survivors"]
 
         if not humans_alive:
-            report = BunkerUtils.generate_game_report(self.players, "💀 Все люди покинули бункер. GAME OVER.")
+            report = BunkerUtils.generate_game_report(self.players, "💀 Все люди погибли. GAME OVER.")
             events.append(GameEvent(type="game_over", content=report))
             return events
 
@@ -259,7 +260,6 @@ class BunkerGame(GameEngine):
         if self.state.phase == "voting":
             if player.name in self.votes:
                 del self.votes[player.name]
-
             alive_count = len(survivors)
             if len(self.votes) >= alive_count:
                 res = await self._finish_voting()
@@ -269,24 +269,38 @@ class BunkerGame(GameEngine):
 
         return events
 
-    # --- Внутренние методы ---
+    # --- Внутренние методы (Генерация тем) ---
 
     def _get_global_topic(self, round_num: int, catastrophe: dict) -> str:
+        """Формирует общую тему, подставляя название катастрофы или проблему"""
         topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
+
         if round_num == 1:
-            return topics_cfg[1]
+            # "ПРЕДСТАВЛЕНИЕ. Катастрофа: {catastrophe}..."
+            return topics_cfg[1].format(catastrophe=catastrophe["name"])
+
         elif round_num == 2:
-            return topics_cfg[2].format(trait="Твоя черта")
+            # "РАСКРЫТИЕ ЧЕРТЫ... {catastrophe}"
+            # Для дашборда черту не подставляем (или ставим заглушку)
+            return topics_cfg[2].format(trait="Твоя черта", catastrophe=catastrophe["name"])
+
         else:
+            # Раунд 3+
+            # Берем проблему из списка катастрофы (циклично)
             idx = (round_num - 3) % len(catastrophe["topics"])
             problem = catastrophe["topics"][idx]
             return topics_cfg[3].format(catastrophe_problem=problem)
 
     def _get_personal_topic(self, player: BasePlayer) -> str:
+        """Подставляет личную черту игрока в тему 2-го раунда"""
+        catastrophe = self.state.shared_data["catastrophe"]
+
         if self.state.round == 2 and self.state.phase == "presentation":
             topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
             real_trait = player.attributes.get("trait", "???")
-            return topics_cfg[2].format(trait=real_trait)
+            # Подставляем И черту, И название катастрофы
+            return topics_cfg[2].format(trait=real_trait, catastrophe=catastrophe["name"])
+
         return self.state.shared_data["topic"]
 
     async def _next_phase(self) -> List[GameEvent]:
@@ -298,8 +312,8 @@ class BunkerGame(GameEngine):
             dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
                                                   [p for p in self.players if p.is_alive])
             events.append(GameEvent(type="update_dashboard", content=dash))
-            events.append(GameEvent(type="message",
-                                    content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nГлавный вопрос: <b>Против кого вы голосуете?</b>\nНазывайте имена."))
+            events.append(
+                GameEvent(type="message", content="🗣 <b>ФАЗА ОБСУЖДЕНИЯ</b>\nКого будем выгонять? Называйте имена."))
             events.append(GameEvent(type="switch_turn"))
 
         elif self.state.phase in ["discussion", "runoff"]:
@@ -325,26 +339,17 @@ class BunkerGame(GameEngine):
         for p in self.players:
             if p.is_human and p.is_alive:
                 my_targets = [t for t in candidates if t.name != p.name]
-
                 if len(my_targets) == 1:
                     target = my_targets[0]
                     self.votes[p.name] = target.name
-                    events.append(GameEvent(
-                        type="message",
-                        target_ids=[p.id],
-                        content=f"⚖️ Дуэль: Ваш голос автоматически уходит против <b>{target.name}</b>"
-                    ))
+                    events.append(GameEvent(type="message", target_ids=[p.id],
+                                            content=f"⚖️ Авто-голос против <b>{target.name}</b>"))
                 else:
                     keyboard_data = []
                     for t in my_targets:
                         keyboard_data.append({"text": f"☠ {t.name}", "callback_data": f"vote_{t.name}"})
-
-                    events.append(GameEvent(
-                        type="message",
-                        target_ids=[p.id],
-                        content="🛑 <b>ГОЛОСОВАНИЕ</b>\nКого изгнать?",
-                        reply_markup=keyboard_data
-                    ))
+                    events.append(GameEvent(type="message", target_ids=[p.id], content="🛑 <b>ГОЛОСОВАНИЕ</b>",
+                                            reply_markup=keyboard_data))
 
         for p in self.players:
             if not p.is_human and p.is_alive:

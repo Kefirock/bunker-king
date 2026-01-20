@@ -14,6 +14,7 @@ NARRATOR_PROMPT = """
 Пример: "За окном грянул гром, и повисшая тишина стала почти осязаемой."
 """
 
+
 class NarratorAgent:
     async def narrate(self, title: str, history: List[str]) -> str:
         # Если истории мало, молчим
@@ -24,15 +25,18 @@ class NarratorAgent:
             history="\n".join(history[-5:])
         )
 
-        model = core_cfg.models["director_models"][0] # Используем модель режиссера
+        model = core_cfg.models["director_models"][0]  # Используем модель режиссера
 
         try:
             response = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.9, # Высокая температура для художественности
+                temperature=0.9,  # Высокая температура для художественности
             )
-            # ИСПРАВЛЕНО: Используем одинарные кавычки снаружи, чтобы внутри использовать двойные
-            return f'<i>*{response.strip().strip('"')}*</i>'
+
+            # ИСПРАВЛЕНИЕ: Выносим обработку в переменную, чтобы избежать SyntaxError
+            clean_text = response.strip().strip('"')
+
+            return f"<i>*{clean_text}*</i>"
         except:
             return ""

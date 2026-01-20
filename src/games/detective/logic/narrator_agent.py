@@ -32,7 +32,7 @@ class NarratorAgent:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.9, # Высокая температура для художественности
             )
-            # Очистка от кавычек
-            return f"<i>*{response.strip().strip('"')}*</i>"
+            # ИСПРАВЛЕНО: Используем одинарные кавычки снаружи, чтобы внутри использовать двойные
+            return f'<i>*{response.strip().strip('"')}*</i>'
         except:
             return ""

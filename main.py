@@ -23,9 +23,6 @@ from src.core.lobby import lobby_manager, Lobby
 from src.core.s3 import s3_uploader
 from src.core.registry import GameRegistry
 
-# --- ВНИМАНИЕ: БОЛЬШЕ НЕТ РУЧНЫХ ИМПОРТОВ ИГР ---
-# Игры загружаются автоматически в функции main()
-
 load_dotenv(os.path.join("Configs", ".env"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -384,7 +381,10 @@ async def start_solo_handler(callback: CallbackQuery):
     game = game_cls(lobby_id=lid, host_name=user.first_name)
     active_games[lid] = game
     await callback.message.edit_text(f"🚀 Запуск симуляции ({game_id})...")
-    events = game.init_game([{"id": user.id, "name": user.first_name}])
+
+    # ИСПРАВЛЕНО: ДОБАВЛЕН AWAIT
+    events = await game.init_game([{"id": user.id, "name": user.first_name}])
+
     for e in events:
         if e.type == "update_dashboard":
             e.type = "message"
@@ -493,7 +493,10 @@ async def lobby_start_handler(callback: CallbackQuery):
     game = game_cls(lobby_id=lobby_id, host_name=host_name)
     active_games[lobby_id] = game
     users_data = lobby.to_game_users_list()
-    events = game.init_game(users_data)
+
+    # ИСПРАВЛЕНО: ДОБАВЛЕН AWAIT
+    events = await game.init_game(users_data)
+
     for e in events:
         if e.type == "update_dashboard":
             e.type = "message"

@@ -11,7 +11,8 @@ class GameEngine(ABC):
         self.state: BaseGameState = None
 
     @abstractmethod
-    def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
+    async def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
+        """Асинхронная инициализация игры"""
         pass
 
     @abstractmethod

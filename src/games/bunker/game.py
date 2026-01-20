@@ -26,7 +26,8 @@ class BunkerGame(GameEngine):
         self.current_turn_index = 0
         self.votes: Dict[str, str] = {}
 
-    def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
+    # ДОБАВЛЕНО ASYNC
+    async def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
         self.players = BunkerUtils.generate_initial_players(users_data)
 
         catastrophe = random.choice(bunker_cfg.scenarios["catastrophes"])
@@ -285,7 +286,6 @@ class BunkerGame(GameEngine):
         if round_num == 1:
             return topics_cfg[1].format(catastrophe=catastrophe["name"])
         elif round_num == 2:
-            # FIX: Передаем catastrophe, так как в конфиге она есть в строке
             return topics_cfg[2].format(trait="Твоя черта", catastrophe=catastrophe["name"])
         else:
             idx = (round_num - 3) % len(catastrophe["topics"])
@@ -297,7 +297,6 @@ class BunkerGame(GameEngine):
         if self.state.round == 2 and self.state.phase == "presentation":
             topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
             real_trait = player.attributes.get("trait", "???")
-            # FIX: Передаем catastrophe
             return topics_cfg[2].format(trait=real_trait, catastrophe=catastrophe["name"])
         return self.state.shared_data["topic"]
 

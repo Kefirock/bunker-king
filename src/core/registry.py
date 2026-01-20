@@ -1,5 +1,9 @@
+import importlib
+import pkgutil
 from typing import Type, Dict, Optional
+import src.games  # Импортируем пакет games, чтобы знать путь к нему
 from src.core.abstract_game import GameEngine
+
 
 class GameRegistry:
     _games: Dict[str, Type[GameEngine]] = {}
@@ -26,6 +30,21 @@ class GameRegistry:
         """Возвращает словарь {id: display_name} для меню"""
         return cls._display_names
 
-    @classmethod
-    def exists(cls, game_id: str) -> bool:
-        return game_id in cls._games
+    @staticmethod
+    def auto_discover():
+        """
+        Автоматически находит и импортирует все модули в папке src/games.
+        Это вызывает код в __init__.py каждой игры, где происходит регистрация.
+        """
+        print("🔍 Scanning for games...")
+        package = src.games
+        prefix = package.__name__ + "."  # "src.games."
+
+        # Сканируем подпапки в src/games
+        for _, name, is_pkg in pkgutil.iter_modules(package.__path__, prefix):
+            if is_pkg:
+                try:
+                    # Импортируем модуль (это триггерит __init__.py)
+                    importlib.import_module(name)
+                except Exception as e:
+                    print(f"🔥 Failed to load game module {name}: {e}")

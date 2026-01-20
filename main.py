@@ -23,17 +23,8 @@ from src.core.lobby import lobby_manager, Lobby
 from src.core.s3 import s3_uploader
 from src.core.registry import GameRegistry
 
-# --- РЕГИСТРАЦИЯ ИГР (ИМПОРТЫ) ---
-# Здесь мы импортируем игры и добавляем их в реестр.
-# В будущем здесь будет больше импортов (MafiaGame, etc).
-try:
-    from src.games.bunker.game import BunkerGame
-
-    GameRegistry.register("bunker", BunkerGame, "☢️ Бункер")
-except ImportError as e:
-    print(f"🔥 IMPORT ERROR (Bunker): {e}")
-    # Не падаем, если игра сломана, просто она не появится в меню
-# ----------------------------------
+# --- ВНИМАНИЕ: БОЛЬШЕ НЕТ РУЧНЫХ ИМПОРТОВ ИГР ---
+# Игры загружаются автоматически в функции main()
 
 load_dotenv(os.path.join("Configs", ".env"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -96,9 +87,7 @@ async def cleanup_lobbies_task():
 # === UI HELPERS ===
 
 async def broadcast_lobby_ui(lobby: Lobby):
-    # Получаем красивое название игры
     game_name = GameRegistry.get_all_games().get(lobby.game_type, lobby.game_type)
-
     current_humans = len(lobby.players)
 
     text = (
@@ -168,7 +157,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     if tid > 0:
                         sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
-                        # Хак для Дашборда (пока оставим generic)
                         if event.extra_data.get("is_dashboard"):
                             if game.lobby_id not in dashboard_map: dashboard_map[game.lobby_id] = {}
                             dashboard_map[game.lobby_id][tid] = sent_msg.message_id
@@ -249,16 +237,12 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 async def cmd_fake_join(message: Message, command: CommandObject):
     user_id = message.from_user.id
     if not ADMIN_ID or user_id != ADMIN_ID: return
-
     lid = lobby_manager.user_to_lobby.get(user_id)
     if not lid: return
-
     lobby = lobby_manager.get_lobby(lid)
     if not lobby or lobby.status != "waiting": return
-
     fake_name = command.args if command.args else f"Fake_{random.choice(['Bob', 'Alice', 'John'])}"
     fake_id = -random.randint(50000, 99999)
-
     lobby.add_player(fake_id, fake_name)
     await message.reply(f"🤖 Фейк <b>{fake_name}</b> добавлен.")
     await broadcast_lobby_ui(lobby)
@@ -270,28 +254,18 @@ async def cmd_fake_say(message: Message, command: CommandObject):
     if not ADMIN_ID or user_id != ADMIN_ID: return
     lid = lobby_manager.user_to_lobby.get(user_id)
     if not lid or lid not in active_games: return
-
     game = active_games[lid]
     text = command.args
     if not text: return
-
-    # Ищем текущего живого игрока
-    # ВНИМАНИЕ: Тут мы предполагаем, что у игры есть players и is_alive, is_human
-    # Это справедливо для всех наследников GameEngine
     active_list = [p for p in game.players if p.is_alive]
-
-    # Специфика бункера: перестрелка. В идеале вынести в GameEngine
     if hasattr(game, "state") and game.state.phase == "runoff":
         candidates = game.state.shared_data.get("runoff_candidates", [])
         active_list = [p for p in active_list if p.name in candidates]
-
     if game.current_turn_index >= len(active_list): return
     current_player = active_list[game.current_turn_index]
-
     if current_player.id > 0:
         await message.reply(f"Сейчас ход реального игрока {current_player.name}.")
         return
-
     events = await game.process_message(player_id=current_player.id, text=text)
     await process_game_events(game.lobby_id, events)
 
@@ -304,14 +278,11 @@ async def cmd_kick(message: Message, command: CommandObject):
     if not lid or lid not in active_games: return
     game = active_games[lid]
     lobby = lobby_manager.get_lobby(lid)
-
     if lobby and lobby.host_id != message.from_user.id:
         await message.reply("⛔ Только хост может кикать.")
         return
-
     target_name = command.args
     if not target_name: return
-
     target_player = next((p for p in game.players if target_name.lower() in p.name.lower() and p.is_human), None)
     if target_player:
         events = await game.player_leave(target_player.id)
@@ -332,28 +303,21 @@ async def cmd_skip(message: Message):
 
 @router.message(Command("vote_as"))
 async def cmd_vote_as(message: Message, command: CommandObject):
-    # Эта команда полезна для тестов, но работает только если game реализует handle_action
     chat_id = message.chat.id
     lid = lobby_manager.user_to_lobby.get(chat_id)
     if not lid and str(chat_id) in active_games: lid = str(chat_id)
     if not lid or lid not in active_games: return
     game = active_games[lid]
-
     is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
     if not is_admin: return
-
     args = command.args.split(maxsplit=1) if command.args else []
     if len(args) < 2: return
-
     voter_name = args[0]
     target_name = args[1]
-
     voter = next((p for p in game.players if voter_name.lower() in p.name.lower()), None)
     if not voter: return
-
     action_data = f"vote_{target_name}"
     events = await game.handle_action(player_id=voter.id, action_data=action_data)
-
     if events:
         await message.reply(f"✅ Голос: {voter.name} -> {target_name}")
         await process_game_events(game.lobby_id, events)
@@ -363,13 +327,11 @@ async def cmd_vote_as(message: Message, command: CommandObject):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
-    # Если есть join_deeplink, обрабатываем
     if command.args and command.args.startswith("join_"):
         lobby_id = command.args.split("_")[1]
         await join_lobby_logic(message, lobby_id)
         return
 
-    # ГЛАВНОЕ МЕНЮ: Список игр
     games = GameRegistry.get_all_games()
     kb = InlineKeyboardBuilder()
 
@@ -384,7 +346,6 @@ async def cmd_start(message: Message, command: CommandObject):
     await message.answer("<b>🎮 GAME HUB</b>\nВыберите игру:", reply_markup=kb.as_markup())
 
 
-# 1. Выбор конкретной игры -> Показ меню режимов
 @router.callback_query(F.data.startswith("select_game_"))
 async def game_select_handler(callback: CallbackQuery):
     game_id = callback.data.split("_")[2]
@@ -402,7 +363,6 @@ async def game_select_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "back_to_root")
 async def back_to_root_handler(callback: CallbackQuery):
-    # Имитируем /start, но редактированием
     games = GameRegistry.get_all_games()
     kb = InlineKeyboardBuilder()
     for game_id, name in games.items():
@@ -411,64 +371,44 @@ async def back_to_root_handler(callback: CallbackQuery):
     await callback.message.edit_text("<b>🎮 GAME HUB</b>\nВыберите игру:", reply_markup=kb.as_markup())
 
 
-# 2. Запуск СОЛО игры
 @router.callback_query(F.data.startswith("solo_"))
 async def start_solo_handler(callback: CallbackQuery):
     game_id = callback.data.split("_")[1]
     game_cls = GameRegistry.get_game_class(game_id)
-
     if not game_cls:
         await callback.answer("Ошибка: игра не найдена", show_alert=True)
         return
-
     user = callback.from_user
     lid = str(callback.message.chat.id)
-
-    # Очищаем старые привязки
     lobby_manager.leave_lobby(user.id)
-
-    # Создаем инстанс игры
     game = game_cls(lobby_id=lid, host_name=user.first_name)
     active_games[lid] = game
-
     await callback.message.edit_text(f"🚀 Запуск симуляции ({game_id})...")
-
     events = game.init_game([{"id": user.id, "name": user.first_name}])
-
-    # Хак для дашборда (Bunker specific, но не сломает другие игры если они не шлют этот флаг)
     for e in events:
         if e.type == "update_dashboard":
             e.type = "message"
             e.extra_data["is_dashboard"] = True
-
     await process_game_events(lid, events)
     turn_events = await game.process_turn()
     await process_game_events(lid, turn_events)
 
 
-# 3. Создание лобби для конкретной игры
 @router.callback_query(F.data.startswith("lobby_create_"))
 async def lobby_create_handler(callback: CallbackQuery):
     game_id = callback.data.split("_")[2]
     user = callback.from_user
-
     lobby_manager.leave_lobby(user.id)
-
-    # ! ВАЖНО: Передаем game_id
     lobby = lobby_manager.create_lobby(user.id, user.first_name, game_type=game_id)
     lobby.user_interfaces[user.id] = callback.message.message_id
-
     await broadcast_lobby_ui(lobby)
 
 
-# 4. Список лобби (фильтрация по игре)
 @router.callback_query(F.data.startswith("lobby_list_"))
 async def lobby_list_handler(callback: CallbackQuery):
     game_id = callback.data.split("_")[2]
     game_name = GameRegistry.get_all_games().get(game_id, "Игра")
-
     lobbies = lobby_manager.get_all_waiting(game_type=game_id)
-
     kb = InlineKeyboardBuilder()
     if not lobbies:
         kb.add(InlineKeyboardButton(text="Нет активных комнат 🤷‍♂️", callback_data="dummy"))
@@ -476,17 +416,13 @@ async def lobby_list_handler(callback: CallbackQuery):
         for l in lobbies:
             count = len(l.players)
             host_name = l.players[l.host_id]['name']
-            # В callback не нужно дублировать ID игры, она есть в лобби
             btn_text = f"🚪 {l.lobby_id} | {host_name} ({count})"
             kb.add(InlineKeyboardButton(text=btn_text, callback_data=f"lobby_join_{l.lobby_id}"))
-
     kb.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"select_game_{game_id}"))
     kb.adjust(1)
-
     await callback.message.edit_text(f"<b>Список комнат ({game_name}):</b>", reply_markup=kb.as_markup())
 
 
-# 5. Присоединение к лобби
 @router.callback_query(F.data.startswith("lobby_join_"))
 async def lobby_join_btn_handler(callback: CallbackQuery):
     lobby_id = callback.data.split("_")[2]
@@ -496,23 +432,19 @@ async def lobby_join_btn_handler(callback: CallbackQuery):
 async def join_lobby_logic(event: Union[Message, CallbackQuery], lobby_id: str):
     user = event.from_user
     is_callback = isinstance(event, CallbackQuery)
-
     if is_callback:
         chat_id = event.message.chat.id
         message_id = event.message.message_id
     else:
         chat_id = event.chat.id
         message_id = 0
-
     lobby_manager.leave_lobby(user.id)
     success = lobby_manager.join_lobby(lobby_id, user.id, user.first_name)
-
     if success:
         lobby = lobby_manager.get_lobby(lobby_id)
         if not is_callback:
             msg = await bot.send_message(chat_id, "Подключение...")
             message_id = msg.message_id
-
         lobby.user_interfaces[user.id] = message_id
         await broadcast_lobby_ui(lobby)
     else:
@@ -523,97 +455,66 @@ async def join_lobby_logic(event: Union[Message, CallbackQuery], lobby_id: str):
             await event.answer(text)
 
 
-# 6. Выход из лобби
 @router.callback_query(F.data == "lobby_leave")
 async def lobby_leave_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     lid = lobby_manager.user_to_lobby.get(user_id)
-
-    # Если игра шла
     if lid and lid in active_games:
         game = active_games[lid]
         game_events = await game.player_leave(user_id)
         await process_game_events(lid, game_events)
-
-    # Выходим из менеджера
     lobby = lobby_manager.leave_lobby(user_id)
-
     if lobby:
-        # Если вышел хост, и игра еще не удалена (например, в ожидании)
         if lobby.host_id == user_id:
             if lid in active_games:
                 await process_game_events(lid, [GameEvent(type="game_over", content="Хост вышел. Игра окончена.")])
         else:
             await callback.answer("Вы вышли.")
-            # Обновляем UI оставшимся
             current_lobby = lobby_manager.get_lobby(lobby.lobby_id)
             if current_lobby: await broadcast_lobby_ui(current_lobby)
-
-    # Возвращаем в главное меню
     await cmd_start(callback.message, CommandObject())
 
 
-# 7. СТАРТ ЛОББИ (ХОСТОМ)
 @router.callback_query(F.data.startswith("lobby_start_"))
 async def lobby_start_handler(callback: CallbackQuery):
     lobby_id = callback.data.split("_")[2]
     lobby = lobby_manager.get_lobby(lobby_id)
     if not lobby: return
-
     if callback.from_user.id != lobby.host_id:
         await callback.answer("Ждите лидера!", show_alert=True)
         return
-
-    # --- ДИНАМИЧЕСКИЙ ЗАПУСК ---
     game_cls = GameRegistry.get_game_class(lobby.game_type)
     if not game_cls:
         await callback.answer("Ошибка: класс игры не найден!", show_alert=True)
         return
-
     lobby.status = "playing"
     await callback.message.edit_text(f"🚀 <b>ИГРА ЗАПУЩЕНА!</b>")
-
     host_name = lobby.players[lobby.host_id]['name']
-
-    # Инстанцируем конкретную игру
     game = game_cls(lobby_id=lobby_id, host_name=host_name)
     active_games[lobby_id] = game
-
     users_data = lobby.to_game_users_list()
     events = game.init_game(users_data)
-
-    # Хак для дашборда
     for e in events:
         if e.type == "update_dashboard":
             e.type = "message"
             e.extra_data["is_dashboard"] = True
-
     await process_game_events(lobby_id, events)
     turn_events = await game.process_turn()
     await process_game_events(lobby_id, turn_events)
 
 
-# === CHAT ROUTING ===
-
 @router.message()
 async def chat_message_handler(message: Message):
     chat_id = message.chat.id
     game = None
-
-    # Пытаемся найти игру по ID чата (Соло) или по Лобби ID
     if str(chat_id) in active_games:
         game = active_games[str(chat_id)]
     else:
         lid = lobby_manager.user_to_lobby.get(chat_id)
         if lid: game = active_games.get(lid)
-
     if not game: return
-
-    # Обновляем таймер лобби, чтобы не закрылось
     lobby = lobby_manager.get_lobby(game.lobby_id)
     if lobby: lobby.touch()
-
-    # Передаем управление движку
     events = await game.process_message(player_id=message.from_user.id, text=message.text)
     await process_game_events(game.lobby_id, events)
 
@@ -628,10 +529,8 @@ async def game_action_handler(callback: CallbackQuery):
         lid = lobby_manager.user_to_lobby.get(chat_id)
         if lid: game = active_games.get(lid)
     if not game: return
-
     lobby = lobby_manager.get_lobby(game.lobby_id)
     if lobby: lobby.touch()
-
     events = await game.handle_action(player_id=callback.from_user.id, action_data=callback.data)
     if events: events[0].extra_data["query_id"] = callback.id
     await process_game_events(game.lobby_id, events)
@@ -642,7 +541,10 @@ async def main():
     asyncio.create_task(cleanup_lobbies_task())
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        # --- AUTO DISCOVERY START ---
+        GameRegistry.auto_discover()
         print("✅ Core System Online. Games loaded: " + ", ".join(GameRegistry.get_all_games().keys()))
+        # --- AUTO DISCOVERY END ---
         await dp.start_polling(bot)
     finally:
         await bot.session.close()

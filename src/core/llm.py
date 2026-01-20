@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 import random
+import re
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from groq import AsyncGroq
@@ -31,66 +32,49 @@ class LLMService:
                        temperature: float = 0.7,
                        json_mode: bool = False,
                        logger=None) -> str:
-        """
-        Умная генерация с Fallback. Если основная модель не отвечает, пробуем другие.
-        """
-        # 1. Подготовка сообщений (копия, чтобы не испортить оригинал при ретраях)
+
         current_messages = [m.copy() for m in messages]
 
         if json_mode:
-            # Добавляем инструкцию JSON, если её нет
-            if not any("json" in (m.get("content") or "").lower() for m in current_messages):
-                sys_msg = {"role": "system", "content": "ОТВЕТЬ СТРОГО В JSON."}
-                if current_messages and current_messages[0].get("role") == "system":
-                    current_messages[0]["content"] += " ОТВЕТЬ СТРОГО В JSON."
-                else:
-                    current_messages.insert(0, sys_msg)
+            sys_msg = " RETURN JSON OBJECT ONLY. NO MARKDOWN. NO COMMENTS."
+            if current_messages and current_messages[0]["role"] == "system":
+                current_messages[0]["content"] += sys_msg
+            else:
+                current_messages.insert(0, {"role": "system", "content": sys_msg})
 
-        # 2. Список моделей для попыток
-        # Сначала основная, потом 2 случайные запасные
         candidates = [model_config]
         all_models = core_cfg.models.get("player_models", [])
-
-        # Добавляем запасные (исключая основную)
         backups = [m for m in all_models if m != model_config]
         random.shuffle(backups)
         candidates.extend(backups[:2])
 
-        # 3. Цикл попыток
-        for i, config in enumerate(candidates):
+        for config in candidates:
             provider = config.get("provider")
             model_id = config.get("model_id")
 
             try:
-                # Жесткий тайм-аут 15 секунд на генерацию
                 response = await asyncio.wait_for(
                     self._call_provider(provider, model_id, current_messages, temperature, json_mode),
-                    timeout=15.0
+                    timeout=20.0
                 )
-
                 if response:
-                    if logger:
-                        logger.log_llm(model_id, current_messages, response)
+                    if logger: logger.log_llm(model_id, current_messages, response)
                     return response
 
-            except (asyncio.TimeoutError, Exception) as e:
-                err_msg = f"LLM Error ({provider}/{model_id}): {e}"
-                if logger: logger.log_event("ERROR", err_msg)
-                print(f"⚠️ {err_msg} -> Switching to backup...")
-                # Идем к следующему кандидату в цикле
+            except Exception as e:
+                print(f"⚠️ LLM Error ({model_id}): {e}")
+                continue
 
-        # Если все попытки провалились
         print("🔥 ALL LLM ATTEMPTS FAILED.")
         return "{}" if json_mode else "..."
 
     async def _call_provider(self, provider: str, model_id: str, messages: List[Dict], temp: float,
                              json_mode: bool) -> str:
-        """Низкоуровневый вызов API"""
         kwargs = {
             "model": model_id,
             "messages": messages,
             "temperature": temp,
-            "max_tokens": 1024
+            "max_tokens": 2048
         }
 
         if json_mode:
@@ -106,16 +90,24 @@ class LLMService:
             completion = self.cerebras_client.chat.completions.create(**kwargs)
             return completion.choices[0].message.content
 
-        else:
-            raise ValueError(f"Unknown provider: {provider}")
+        return "{}"
 
     @staticmethod
     def parse_json(text: Optional[str]) -> Dict[str, Any]:
         if not text: return {}
-        clean_text = text.replace("```json", "").replace("```", "").strip()
+
+        # Очистка Markdown
+        pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            clean_text = match.group(1)
+        else:
+            clean_text = text.strip()
+
         try:
             return json.loads(clean_text)
-        except:
+        except json.JSONDecodeError:
+            print(f"❌ JSON Parse Error. Raw: {clean_text[:100]}...")
             return {}
 
 

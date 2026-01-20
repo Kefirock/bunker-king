@@ -1,13 +1,16 @@
 import asyncio
+from collections import Counter
 from typing import List, Dict
 
 from src.core.abstract_game import GameEngine
 from src.core.schemas import BasePlayer, BaseGameState, GameEvent
 from src.core.logger import SessionLogger
 
-from src.games.detective.schemas import DetectiveStateData, DetectiveScenario, DetectivePlayerProfile, GamePhase
+from src.games.detective.schemas import DetectiveStateData, DetectiveScenario, DetectivePlayerProfile, GamePhase, Fact, \
+    RoleType
 from src.games.detective.logic.scenario_gen import ScenarioGenerator
 from src.games.detective.logic.suggestion_agent import SuggestionAgent
+from src.games.detective.logic.bot_agent import DetectiveBotAgent
 from src.games.detective.utils import DetectiveUtils
 
 
@@ -18,20 +21,19 @@ class DetectiveGame(GameEngine):
 
         self.scenario_gen = ScenarioGenerator()
         self.suggestion_agent = SuggestionAgent()
+        self.bot_agent = DetectiveBotAgent()
 
-        self.private_dash_tokens = {}
-
-        # ИСПРАВЛЕНО: УБРАН loop.run_until_complete, ДОБАВЛЕН async/await
+        self.current_turn_index = 0
+        self.votes = {}
 
     async def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
         names = [u["name"] for u in users_data]
-
-        # Теперь это легальный асинхронный вызов
         scenario, profiles_map = await self.scenario_gen.generate(names)
 
         self.players = []
         for u in users_data:
-            p = BasePlayer(id=u["id"], name=u["name"], is_human=True)
+            is_human = u["id"] > 0 or u["id"] < -50000
+            p = BasePlayer(id=u["id"], name=u["name"], is_human=is_human)
             prof = profiles_map.get(u["name"])
             p.attributes["detective_profile"] = prof
             self.players.append(p)
@@ -39,7 +41,7 @@ class DetectiveGame(GameEngine):
         self.state = BaseGameState(
             game_id=self.lobby_id,
             round=1,
-            phase=GamePhase.BRIEFING,
+            phase=GamePhase.INVESTIGATION,
             history=[],
             shared_data=DetectiveStateData(
                 scenario=scenario,
@@ -48,8 +50,8 @@ class DetectiveGame(GameEngine):
         )
 
         events = []
-
         events.append(GameEvent(type="message", content=f"🕵️‍♂️ <b>ДЕЛО: {scenario.title}</b>\n{scenario.description}"))
+        events.append(GameEvent(type="message", content="💡 <i>Напишите /finish, чтобы начать голосование.</i>"))
 
         for p in self.players:
             events.extend(self._create_dashboard_update(p, is_new=True))
@@ -57,23 +59,71 @@ class DetectiveGame(GameEngine):
         return events
 
     async def process_turn(self) -> List[GameEvent]:
+        if self.state.phase == GamePhase.FINAL_VOTE:
+            return await self._process_voting_turn()
+
+        if not self.players: return []
+
+        self.current_turn_index = (self.current_turn_index + 1) % len(self.players)
+        current_player = self.players[self.current_turn_index]
+
+        if not current_player.is_human:
+            msg_token = f"turn_{self.state.turn_count}_{current_player.id}"
+            self.state.shared_data["turn_count"] += 1
+            return [
+                GameEvent(type="message", content=f"⏳ <b>{current_player.name}</b> печатает...", token=msg_token),
+                GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id})
+            ]
         return []
+
+    async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
+        bot = next((p for p in self.players if p.id == bot_id), None)
+        if not bot: return []
+
+        scen_data = self.state.shared_data["scenario"]
+        all_facts_dict = scen_data["all_facts"]
+        all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
+        pub_ids = self.state.shared_data["public_facts"]
+        pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
+
+        decision = await self.bot_agent.make_turn(
+            bot, self.players, scen_data, self.state.history, pub_facts, all_facts_objs
+        )
+
+        speech = decision.get("speech", "...")
+        fact_to_reveal = decision.get("reveal_fact_id")
+
+        events = []
+        self.state.history.append(f"[{bot.name}]: {speech}")
+        final_msg = f"<b>{bot.name}</b>:\n{speech}"
+        events.append(GameEvent(type="edit_message", content=final_msg, token=token))
+
+        if fact_to_reveal:
+            reveal_events = await self._reveal_fact(bot, fact_to_reveal)
+            events.extend(reveal_events)
+
+        events.append(GameEvent(type="switch_turn"))
+        return events
 
     async def process_message(self, player_id: int, text: str) -> List[GameEvent]:
         p = next((x for x in self.players if x.id == player_id), None)
         if not p: return []
 
-        self.state.history.append(f"[{p.name}]: {text}")
+        # КОМАНДА ДЛЯ СТАРТА ГОЛОСОВАНИЯ
+        if text.strip() == "/finish":
+            if self.state.phase == GamePhase.INVESTIGATION:
+                return await self._start_voting()
+            else:
+                return [GameEvent(type="message", target_ids=[player_id], content="Голосование уже идет!")]
 
+        self.state.history.append(f"[{p.name}]: {text}")
         msg = f"<b>{p.name}</b>: {text}"
 
         others = [x.id for x in self.players if x.id != player_id]
         events = [GameEvent(type="message", target_ids=others, content=msg)]
+        events.append(GameEvent(type="switch_turn"))
 
         return events
-
-    async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
-        return []
 
     async def handle_action(self, player_id: int, action_data: str) -> List[GameEvent]:
         p = next((x for x in self.players if x.id == player_id), None)
@@ -86,79 +136,162 @@ class DetectiveGame(GameEngine):
         elif action_data == "refresh_suggestions":
             return await self._refresh_suggestions(p)
 
+        elif action_data.startswith("vote_"):
+            return await self._handle_human_vote(p, action_data.split("_")[1])
+
         return []
 
-    # --- INTERNAL LOGIC ---
+    # --- VOTING LOGIC ---
 
-    async def _reveal_fact(self, player: BasePlayer, fact_id: str) -> List[GameEvent]:
-        scen_data = self.state.shared_data["scenario"]
-        all_facts = scen_data["all_facts"]
-        fact = all_facts.get(fact_id)
-
-        if not fact: return []
-        if fact["is_public"]:
-            return [GameEvent(type="callback_answer", target_ids=[player.id], content="Уже вскрыто!")]
-
-        fact["is_public"] = True
-        self.state.shared_data["public_facts"].append(fact_id)
-
-        prof: DetectivePlayerProfile = player.attributes["detective_profile"]
-        prof.published_facts_count += 1
-
+    async def _start_voting(self) -> List[GameEvent]:
+        self.state.phase = GamePhase.FINAL_VOTE
+        self.votes = {}
         events = []
-        msg = f"⚡ <b>НОВАЯ УЛИКА!</b>\nИгрок {player.name} вскрывает факт:\n\n📜 <b>{fact['text']}</b>"
-        events.append(GameEvent(type="message", content=msg))
-        events.extend(self._create_dashboard_update(player))
 
+        events.append(GameEvent(type="message", content="🛑 <b>СТОП ИГРА! ПРИШЛО ВРЕМЯ ОБВИНЕНИЙ.</b>\nКто убийца?"))
+
+        # Показываем кнопки всем людям
+        candidates = [p for p in self.players]
+
+        for p in self.players:
+            if p.is_human:
+                kb = []
+                for cand in candidates:
+                    kb.append({"text": cand.name, "callback_data": f"vote_{cand.name}"})
+
+                events.append(GameEvent(
+                    type="message",
+                    target_ids=[p.id],
+                    content="👉 <b>Выберите виновного:</b>",
+                    reply_markup=kb
+                ))
+
+        # Переключаем ход, чтобы боты тоже проголосовали
+        events.append(GameEvent(type="switch_turn"))
         return events
 
-    async def _refresh_suggestions(self, player: BasePlayer) -> List[GameEvent]:
-        events = [GameEvent(type="callback_answer", target_ids=[player.id], content="Думаю...")]
+    async def _process_voting_turn(self) -> List[GameEvent]:
+        # Голосуют боты (все сразу для скорости)
+        events = []
 
         scen_data = self.state.shared_data["scenario"]
         all_facts_dict = scen_data["all_facts"]
         all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
-
         pub_ids = self.state.shared_data["public_facts"]
         pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
 
+        for p in self.players:
+            if not p.is_human and p.name not in self.votes:
+                vote_target = await self.bot_agent.make_vote(
+                    p, self.players, scen_data, self.state.history, pub_facts
+                )
+                self.votes[p.name] = vote_target
+                # events.append(GameEvent(type="message", content=f"🤖 {p.name} сделал выбор."))
+
+        # Если все проголосовали - финиш
+        if len(self.votes) == len(self.players):
+            events.extend(await self._finish_game())
+
+        return events
+
+    async def _handle_human_vote(self, player: BasePlayer, target_name: str) -> List[GameEvent]:
+        if player.name in self.votes:
+            return [GameEvent(type="callback_answer", target_ids=[player.id], content="Голос уже принят")]
+
+        self.votes[player.name] = target_name
+
+        events = [
+            GameEvent(type="callback_answer", target_ids=[player.id], content=f"Выбор: {target_name}"),
+            GameEvent(type="message", target_ids=[player.id], content=f"🗳️ Ваш голос: <b>{target_name}</b>")
+        ]
+
+        if len(self.votes) == len(self.players):
+            events.extend(await self._finish_game())
+        else:
+            events.append(GameEvent(type="switch_turn"))  # Триггерим проверку ботов
+
+        return events
+
+    async def _finish_game(self) -> List[GameEvent]:
+        events = []
+        scen_data = self.state.shared_data["scenario"]
+
+        # Подсчет
+        counts = Counter(self.votes.values())
+        results = counts.most_common()
+        winner_name, votes_cnt = results[0]
+
+        # Кто убийца?
+        real_killer = next((p for p in self.players if p.attributes["detective_profile"].role == RoleType.KILLER), None)
+        if not real_killer:
+            real_killer_name = "Никто"
+        else:
+            real_killer_name = real_killer.name
+
+        report = f"📊 <b>ИТОГИ ГОЛОСОВАНИЯ:</b>\n"
+        for name, cnt in counts.items():
+            report += f"- {name}: {cnt}\n"
+
+        report += f"\n🕵️‍♂️ <b>ОБВИНЯЕМЫЙ:</b> {winner_name}\n"
+        report += f"🔪 <b>НАСТОЯЩИЙ УБИЙЦА:</b> {real_killer_name}\n\n"
+
+        if winner_name == real_killer_name:
+            report += "🎉 <b>ПОБЕДА ДЕТЕКТИВОВ!</b> Преступник пойман."
+        else:
+            report += "💀 <b>ПОБЕДА УБИЙЦЫ!</b> Вы обвинили невиновного."
+
+        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n{scen_data['true_solution']}"
+
+        events.append(GameEvent(type="game_over", content=report))
+        return events
+
+    # --- INTERNAL LOGIC (COPY FROM PREVIOUS STEP) ---
+    async def _reveal_fact(self, player: BasePlayer, fact_id: str) -> List[GameEvent]:
+        scen_data = self.state.shared_data["scenario"]
+        all_facts = scen_data["all_facts"]
+        fact = all_facts.get(fact_id)
+        if not fact: return []
+        if fact["is_public"]:
+            return [GameEvent(type="callback_answer", target_ids=[player.id], content="Уже вскрыто!")]
+        fact["is_public"] = True
+        self.state.shared_data["public_facts"].append(fact_id)
+        prof: DetectivePlayerProfile = player.attributes["detective_profile"]
+        prof.published_facts_count += 1
+        events = []
+        from src.games.detective.utils import FACT_TYPE_ICONS, FactType
+        ftype = FactType(fact["type"])
+        icon = FACT_TYPE_ICONS.get(ftype, "📄")
+        msg = (f"⚡ <b>НОВАЯ УЛИКА!</b>\nИгрок <b>{player.name}</b> выкладывает карту:\n\n{icon} <b>{fact['text']}</b>")
+        events.append(GameEvent(type="message", content=msg))
+        events.extend(self._create_dashboard_update(player))
+        return events
+
+    async def _refresh_suggestions(self, player: BasePlayer) -> List[GameEvent]:
+        events = [GameEvent(type="callback_answer", target_ids=[player.id], content="Думаю...")]
+        scen_data = self.state.shared_data["scenario"]
+        all_facts_dict = scen_data["all_facts"]
+        all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
+        pub_ids = self.state.shared_data["public_facts"]
+        pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
         sugg = await self.suggestion_agent.generate(
             player, self.state.history, pub_facts, all_facts_objs
         )
-
         player.attributes["detective_profile"].last_suggestions = sugg
-
         events.extend(self._create_dashboard_update(player))
-
         return events
 
     def _create_dashboard_update(self, player: BasePlayer, is_new=False) -> List[GameEvent]:
         scen_data = self.state.shared_data["scenario"]
         all_facts_dict = scen_data["all_facts"]
         all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
-
         text = DetectiveUtils.get_private_dashboard(player, all_facts_objs)
         kb = DetectiveUtils.get_inventory_keyboard(player, all_facts_objs)
-
         token = f"dash_{player.id}"
-
         if is_new:
-            return [GameEvent(
-                type="message",
-                target_ids=[player.id],
-                content=text,
-                reply_markup=kb,
-                token=token,
-                extra_data={"is_dashboard": True}
-            )]
+            return [GameEvent(type="message", target_ids=[player.id], content=text, reply_markup=kb, token=token,
+                              extra_data={"is_dashboard": True})]
         else:
-            return [GameEvent(
-                type="edit_message",
-                target_ids=[player.id],
-                content=text,
-                reply_markup=kb,
-                token=token
-            )]
+            return [GameEvent(type="edit_message", target_ids=[player.id], content=text, reply_markup=kb, token=token)]
 
     def get_player_view(self, viewer_id: int) -> str:
         return "Detective View"

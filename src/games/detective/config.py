@@ -8,8 +8,6 @@ class DetectiveConfig:
         self.base_dir = os.path.join(current_dir, "configs")
 
         if not os.path.exists(self.base_dir):
-            print(f"🔥 CRITICAL: Detective config dir missing at {self.base_dir}")
-            # Создаем пустую папку, чтобы не падать, если её нет (хотя должна быть)
             os.makedirs(self.base_dir, exist_ok=True)
 
         self.prompts = self._load("prompts.yaml")

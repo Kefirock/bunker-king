@@ -25,7 +25,7 @@ class DetectiveUtils:
         lines = ["\n<b>⚡ ВСКРЫТЫЕ ФАКТЫ:</b>"]
         for f in public_facts:
             icon = FACT_TYPE_ICONS.get(f.type, "📄")
-            lines.append(f"{icon} <b>{f.type}:</b> {f.text}")
+            lines.append(f"{icon} <b>{f.keyword}:</b> {f.text}")
         return header + "\n".join(lines)
 
     @staticmethod
@@ -35,19 +35,16 @@ class DetectiveUtils:
 
         role_str = ROLE_MAP.get(prof.role, str(prof.role))
 
-        # Основная инфо
         text = (
             f"<b>ВАШЕ ДОСЬЕ:</b> {role_str}\n"
             f"🎯 Цель: {prof.secret_objective}\n"
             f"📜 Легенда: <i>{prof.bio}</i>\n\n"
         )
 
-        # Статус
         done = prof.published_facts_count
         status = "✅ Норма выполнена" if done >= 2 else f"⚠️ Нужно вскрыть еще: <b>{2 - done}</b>"
         text += f"📊 <b>Вклад:</b> {status}\n\n"
 
-        # Суфлер (Автоматический)
         sugg = prof.last_suggestions
         if sugg:
             text += "💡 <b>ПОДСКАЗКИ:</b>\n"
@@ -69,9 +66,11 @@ class DetectiveUtils:
             fact = all_facts.get(fid)
             if fact and not fact.is_public:
                 icon = FACT_TYPE_ICONS.get(fact.type, "📄")
-                # Короткая кнопка: Иконка + Номер
-                btn_text = f"{icon} Улика #{count} (Посмотреть)"
-                # action: "preview" вместо "reveal"
+
+                # ИСПОЛЬЗУЕМ KEYWORD ДЛЯ КНОПКИ
+                btn_text = f"{icon} {fact.keyword}"
+
+                # Используем preview_ для безопасного просмотра
                 kb.append({"text": btn_text, "callback_data": f"preview_{fid}"})
                 count += 1
 

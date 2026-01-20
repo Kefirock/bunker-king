@@ -7,13 +7,15 @@ from src.games.detective.config import detective_cfg
 from src.games.detective.schemas import DetectiveScenario, Fact, FactType, RoleType, DetectivePlayerProfile
 
 
+class ScenarioGenerationError(Exception):
+    """Исключение, выбрасываемое, если нейросеть не справилась с генерацией."""
+    pass
+
+
 class ScenarioGenerator:
     async def generate(self, player_names: List[str]) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
         count = len(player_names)
-
-        # Если игроков мало (соло), просим сценарий минимум на 3 персоны,
-        # но в roles ожидаем именно наших игроков.
-        # (В будущем лучше добавлять ботов до генерации, но сейчас фиксим краш)
+        # Если игроков мало, просим сценарий минимум на 3 персоны, чтобы сюжет был интереснее
         total_facts = max(5, count * 2 + 1)
 
         system_prompt = detective_cfg.prompts["scenario_writer"]["system"].format(
@@ -23,25 +25,55 @@ class ScenarioGenerator:
         )
 
         model = core_cfg.models["player_models"][0]
+        max_attempts = 3
 
-        response = await llm_client.generate(
-            model_config=model,
-            messages=[{"role": "system", "content": system_prompt}],
-            temperature=0.8,
-            json_mode=True
-        )
+        # --- ЦИКЛ ПОПЫТОК (RETRY LOOP) ---
+        for attempt in range(1, max_attempts + 1):
+            print(f"🧠 Детектив: Попытка генерации сценария ({attempt}/{max_attempts})...")
 
-        data = llm_client.parse_json(response)
+            try:
+                # С каждой попыткой немного увеличиваем температуру для вариативности
+                current_temp = 0.7 + (attempt * 0.1)
 
-        # Строгая проверка структуры JSON, но не контента
-        if not data or "facts" not in data or "roles" not in data:
-            print("⚠️ LLM returned bad JSON. Retrying once...")
-            # Простой механизм ретрая можно реализовать на уровне сервиса,
-            # здесь для надежности выдадим пустой шаблон, чтобы не крашить апп,
-            # но в идеале нужно кидать ошибку выше.
-            # В данном случае вернем ошибку, так как без структуры играть нельзя.
-            raise RuntimeError("LLM failed to generate a valid scenario structure.")
+                response = await llm_client.generate(
+                    model_config=model,
+                    messages=[{"role": "system", "content": system_prompt}],
+                    temperature=current_temp,
+                    json_mode=True
+                )
 
+                data = llm_client.parse_json(response)
+
+                # --- СТРОГАЯ ВАЛИДАЦИЯ ---
+                if not data or "facts" not in data or "roles" not in data:
+                    print(f"⚠️ Попытка {attempt}: Битый JSON или отсутствуют обязательные поля.")
+                    continue
+
+                roles_data = data.get("roles", [])
+                generated_names = [r.get("player_name") for r in roles_data]
+
+                # Проверяем, для всех ли игроков создана роль
+                # Нейросеть обязана вернуть роль для КАЖДОГО имени из player_names
+                missing_players = [name for name in player_names if name not in generated_names]
+
+                if missing_players:
+                    print(f"⚠️ Попытка {attempt}: Нейросеть забыла игроков: {missing_players}.")
+                    continue  # Идем на следующую попытку
+
+                # Если дошли сюда — генерация успешна!
+                print(f"✅ Сценарий успешно сгенерирован с {attempt} попытки.")
+                return self._parse_scenario(data, player_names)
+
+            except Exception as e:
+                print(f"⚠️ Попытка {attempt}: Критическая ошибка генерации: {e}")
+                continue
+
+        # Если цикл завершился без успеха:
+        raise ScenarioGenerationError("Нейросеть не смогла сгенерировать связный сценарий за 3 попытки.")
+
+    def _parse_scenario(self, data: Dict, player_names: List[str]) -> Tuple[
+        DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
+        """Конвертирует сырой валидный JSON в объекты игры"""
         scenario = DetectiveScenario(
             title=data.get("title", "Unknown Case"),
             description=data.get("description", "..."),
@@ -54,19 +86,10 @@ class ScenarioGenerator:
         roles_data = data.get("roles", [])
         facts_data = data.get("facts", [])
 
-        # 1. Привязка Ролей к Именам (С ЗАЩИТОЙ ОТ СБОЕВ)
+        # 1. Привязка Ролей
         for name in player_names:
-            # Пытаемся найти роль для игрока
-            p_data = next((r for r in roles_data if r.get("player_name") == name), None)
-
-            # ИСПРАВЛЕНИЕ: Если LLM забыла игрока, создаем дефолтную роль
-            if not p_data:
-                print(f"⚠️ Warning: LLM missed role for '{name}'. Assigning default.")
-                p_data = {
-                    "role": "INNOCENT",
-                    "bio": "Вы оказались на месте преступления случайно. У вас нет особых тайн, но вы хотите разобраться в случившемся.",
-                    "secret": "Вы боитесь, что вас обвинят по ошибке."
-                }
+            # Здесь мы уверены, что роль есть, благодаря валидации выше
+            p_data = next((r for r in roles_data if r.get("player_name") == name))
 
             r_str = str(p_data.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
@@ -76,14 +99,6 @@ class ScenarioGenerator:
                 bio=p_data.get("bio", ""),
                 secret_objective=p_data.get("secret", "")
             )
-
-        # Проверка на наличие хотя бы одного убийцы.
-        # Если LLM сделала всех невинными, назначаем убийцу принудительно.
-        killers = [p for p in player_profiles.values() if p.role == RoleType.KILLER]
-        if not killers and player_profiles:
-            random_name = random.choice(list(player_profiles.keys()))
-            player_profiles[random_name].role = RoleType.KILLER
-            player_profiles[random_name].secret_objective = "Скрыть свою вину любой ценой."
 
         # 2. Создание Фактов
         random.shuffle(facts_data)
@@ -101,9 +116,17 @@ class ScenarioGenerator:
             else:
                 ftype = FactType.TESTIMONY
 
+            # Генерация заголовка (keyword) для кнопки
+            keyword = f_data.get("keyword")
+            if not keyword:
+                words = f_data.get("text", "Улика").split()
+                # Берем первые 2-3 слова, если нейросеть забыла сгенерировать keyword
+                keyword = " ".join(words[:2]) + "..." if words else "Улика"
+
             fact = Fact(
                 id=fid,
                 text=f_data.get("text", "???"),
+                keyword=keyword[:20],  # Обрезаем, чтобы влезло в кнопку
                 type=ftype,
                 is_public=False
             )
@@ -117,6 +140,7 @@ class ScenarioGenerator:
             if owner_name and owner_name in player_profiles:
                 target_profile = player_profiles[owner_name]
             else:
+                # Если владелец не указан, даем тому, у кого меньше карт (балансировка)
                 target_profile = min(player_profiles.values(), key=lambda p: len(p.inventory))
 
             target_profile.inventory.append(fid)

@@ -382,7 +382,6 @@ async def start_solo_handler(callback: CallbackQuery):
     active_games[lid] = game
     await callback.message.edit_text(f"🚀 Запуск симуляции ({game_id})...")
 
-    # ИСПРАВЛЕНО: ДОБАВЛЕН AWAIT
     events = await game.init_game([{"id": user.id, "name": user.first_name}])
 
     for e in events:
@@ -494,7 +493,6 @@ async def lobby_start_handler(callback: CallbackQuery):
     active_games[lobby_id] = game
     users_data = lobby.to_game_users_list()
 
-    # ИСПРАВЛЕНО: ДОБАВЛЕН AWAIT
     events = await game.init_game(users_data)
 
     for e in events:
@@ -522,7 +520,10 @@ async def chat_message_handler(message: Message):
     await process_game_events(game.lobby_id, events)
 
 
-@router.callback_query(F.data.startswith("vote_"))
+# ИСПРАВЛЕННЫЙ ХЕНДЛЕР ДЛЯ ИГРОВЫХ ДЕЙСТВИЙ
+# Ловит preview_, reveal_, refresh_, vote_
+@router.callback_query(
+    F.data.func(lambda data: any(data.startswith(p) for p in ["vote_", "preview_", "reveal_", "refresh_"])))
 async def game_action_handler(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     game = None

@@ -53,7 +53,8 @@ class DetectiveUtils:
             if sugg.bluff_text: text += f"🎭 <i>Хитрость:</i> <code>{sugg.bluff_text[:50]}...</code>\n"
             text += "<i>(Нажмите на текст, чтобы скопировать)</i>\n"
 
-        text += "\n👇 <b>ВАШ ИНВЕНТАРЬ (Нажмите для просмотра):</b>"
+        # ИСПРАВЛЕНО: Инструкция перенесена сюда
+        text += "\n👇 <b>ВАШ ИНВЕНТАРЬ:</b>\n<i>(Нажмите на кнопку, чтобы осмотреть улику перед публикацией)</i>"
         return text
 
     @staticmethod
@@ -66,11 +67,7 @@ class DetectiveUtils:
             fact = all_facts.get(fid)
             if fact and not fact.is_public:
                 icon = FACT_TYPE_ICONS.get(fact.type, "📄")
-
-                # ИСПОЛЬЗУЕМ KEYWORD ДЛЯ КНОПКИ
                 btn_text = f"{icon} {fact.keyword}"
-
-                # Используем preview_ для безопасного просмотра
                 kb.append({"text": btn_text, "callback_data": f"preview_{fid}"})
                 count += 1
 

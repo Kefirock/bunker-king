@@ -3,7 +3,7 @@ from src.core.llm import llm_client
 from src.core.config import core_cfg
 from src.core.schemas import BasePlayer
 from src.games.detective.schemas import SuggestionData, Fact
-from src.games.detective.config import detective_cfg  # <--- Импорт
+from src.games.detective.config import detective_cfg
 
 
 class SuggestionAgent:
@@ -24,11 +24,11 @@ class SuggestionAgent:
             if fact: my_facts_txt.append(f"[{fact.type}] {fact.text}")
         priv_txt = "; ".join(my_facts_txt) or "Пусто"
 
-        # Берем из конфига
         prompt_template = detective_cfg.prompts["suggestion"]["system"]
 
         prompt = prompt_template.format(
             role=prof.role,
+            character_name=prof.character_name,  # <-- Передаем имя персонажа
             bio=prof.bio,
             objective=prof.secret_objective,
             public_facts=pub_txt,

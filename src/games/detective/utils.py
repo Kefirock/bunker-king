@@ -1,4 +1,3 @@
-import random
 from typing import List, Dict
 from src.core.schemas import BasePlayer
 from src.games.detective.schemas import Fact, DetectivePlayerProfile, FactType, RoleType
@@ -33,8 +32,7 @@ BOT_NAMES_POOL = [
 class DetectiveUtils:
     @staticmethod
     def get_bot_names(count: int) -> List[str]:
-        """Возвращает случайные уникальные имена для ботов"""
-        # Здесь используется random, поэтому импорт обязателен
+        import random
         return random.sample(BOT_NAMES_POOL, min(count, len(BOT_NAMES_POOL)))
 
     @staticmethod
@@ -56,10 +54,12 @@ class DetectiveUtils:
 
         role_str = ROLE_MAP.get(prof.role, str(prof.role))
 
+        # ИСПРАВЛЕНО: Добавлено отображение Имени Персонажа
         text = (
-            f"<b>ВАШЕ ДОСЬЕ:</b> {role_str}\n"
-            f"🎯 Цель: {prof.secret_objective}\n"
-            f"📜 Легенда: <i>{prof.bio}</i>\n\n"
+            f"🎭 <b>ВАШ ПЕРСОНАЖ:</b> {prof.character_name}\n"
+            f"🏷 <b>Статус:</b> {role_str}\n"
+            f"🎯 <b>Цель:</b> {prof.secret_objective}\n"
+            f"📜 <b>Легенда:</b> <i>{prof.bio}</i>\n\n"
         )
 
         done = prof.published_facts_count
@@ -81,8 +81,6 @@ class DetectiveUtils:
     def get_inventory_keyboard(player: BasePlayer, all_facts: Dict[str, Fact]) -> List[Dict]:
         prof: DetectivePlayerProfile = player.attributes.get("detective_profile")
         kb = []
-
-        # Кнопка обновления мыслей удалена намеренно
 
         for fid in prof.inventory:
             fact = all_facts.get(fid)

@@ -4,7 +4,7 @@ from src.core.llm import llm_client
 from src.core.config import core_cfg
 from src.core.schemas import BasePlayer
 from src.games.detective.schemas import Fact, DetectivePlayerProfile, RoleType
-from src.games.detective.config import detective_cfg  # <--- Импорт конфига
+from src.games.detective.config import detective_cfg
 
 
 class DetectiveBotAgent:
@@ -29,11 +29,12 @@ class DetectiveBotAgent:
 
         inv_str = "\n".join(inv_lines) if inv_lines else "Пусто (или все вскрыто)"
 
-        # Загружаем промпт из конфига
+        # Загружаем промпт
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
         prompt = prompt_template.format(
             name=bot.name,
+            character_name=prof.character_name,  # <-- Передаем имя персонажа
             role=prof.role,
             bio=prof.bio,
             objective=prof.secret_objective,
@@ -74,13 +75,18 @@ class DetectiveBotAgent:
             return candidates[0].name
 
         pub_str = "; ".join([f"{f.text}" for f in public_facts])
-        cand_str = ", ".join([p.name for p in candidates])
 
-        # Загружаем промпт голосования из конфига
+        # Формируем список кандидатов: "Имя (Персонаж)"
+        cand_str = ", ".join([
+            f"{p.name} ({p.attributes['detective_profile'].character_name})"
+            for p in candidates
+        ])
+
         prompt_template = detective_cfg.prompts["bot_player"]["vote"]
 
         prompt = prompt_template.format(
             name=bot.name,
+            character_name=prof.character_name,  # <-- Передаем имя персонажа
             role=prof.role,
             scenario_title=scenario_data.get("title", ""),
             public_facts=pub_str,

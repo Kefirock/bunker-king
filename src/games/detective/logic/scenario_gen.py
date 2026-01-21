@@ -15,10 +15,9 @@ class ScenarioGenerator:
     async def generate(self, player_names: List[str]) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
         count = len(player_names)
 
-        # Промпт теперь просит 5 фактов ВНУТРИ роли
+        # Промпт теперь не получает player_names, только количество
         system_prompt = detective_cfg.prompts["scenario_writer"]["system"].format(
             player_count=count,
-            player_names=", ".join(player_names),
             total_facts=count * 5
         )
 
@@ -39,19 +38,19 @@ class ScenarioGenerator:
 
                 data = llm_client.parse_json(response)
 
-                # Валидация
+                # Валидация структуры
                 if not data or "roles" not in data:
                     print(f"⚠️ Попытка {attempt}: Нет поля roles.")
                     continue
 
                 roles_data = data.get("roles", [])
-                generated_names = [r.get("player_name") for r in roles_data]
 
-                missing = [name for name in player_names if name not in generated_names]
-                if missing:
-                    print(f"⚠️ Попытка {attempt}: Забыты игроки {missing}")
+                # Проверяем, хватит ли ролей на всех игроков
+                if len(roles_data) < count:
+                    print(f"⚠️ Попытка {attempt}: Сгенерировано {len(roles_data)} ролей, нужно {count}.")
                     continue
 
+                # Если все ок, парсим
                 return self._parse_scenario(data, player_names)
 
             except Exception as e:
@@ -73,27 +72,34 @@ class ScenarioGenerator:
         player_profiles: Dict[str, DetectivePlayerProfile] = {}
         roles_data = data.get("roles", [])
 
-        for name in player_names:
-            p_data = next((r for r in roles_data if r.get("player_name") == name))
+        # Перемешиваем роли для случайности
+        random.shuffle(roles_data)
 
-            r_str = str(p_data.get("role", "INNOCENT")).upper()
+        # МАППИНГ: Игрок[i] получает Роль[i]
+        for i, real_name in enumerate(player_names):
+            # Если ролей меньше, чем игроков (теоретически невозможно из-за проверки выше, но для safety)
+            role_json = roles_data[i] if i < len(roles_data) else roles_data[0]
+
+            char_name = role_json.get("character_name", f"Персонаж {i + 1}")
+
+            r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
             profile = DetectivePlayerProfile(
+                character_name=char_name,  # Запоминаем имя персонажа
                 role=role_enum,
-                bio=p_data.get("bio", ""),
-                secret_objective=p_data.get("secret", "")
+                bio=role_json.get("bio", ""),
+                secret_objective=role_json.get("secret", "")
             )
 
-            # --- ПАРСИНГ ПЕРСОНАЛЬНЫХ ФАКТОВ ---
-            # Теперь факты берутся изнутри объекта роли
-            raw_facts = p_data.get("facts", [])
+            # Парсинг фактов
+            raw_facts = role_json.get("facts", [])
 
-            # Если фактов меньше 5, дублируем последние (костыль, но лучше чем краш)
+            # Добиваем до 5 фактов (дублированием, если мало)
             while len(raw_facts) < 5 and raw_facts:
                 raw_facts.append(raw_facts[-1].copy())
 
-            for f_data in raw_facts[:5]:  # Берем строго 5
+            for f_data in raw_facts[:5]:
                 fid = str(uuid.uuid4())[:8]
 
                 ftype_str = str(f_data.get("type", "TESTIMONY")).upper()
@@ -119,10 +125,9 @@ class ScenarioGenerator:
                     is_public=False
                 )
 
-                # Добавляем в глобальный список и в личный инвентарь
                 scenario.all_facts[fid] = fact
                 profile.inventory.append(fid)
 
-            player_profiles[name] = profile
+            player_profiles[real_name] = profile
 
         return scenario, player_profiles

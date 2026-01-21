@@ -356,3 +356,33 @@ class DetectiveGame(GameEngine):
 
         if winner_name == real_killer.name:
             report += "🎉 <b>ПОБЕДА ДЕТЕКТИВОВ!</b> Преступник пойман."
+        else:
+            report += "💀 <b>ПОБЕДА УБИЙЦЫ!</b> Вы обвинили невиновного."
+
+        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n{scen_data['true_solution']}"
+        events.append(GameEvent(type="game_over", content=report))
+        return events
+
+    def _create_dashboard_update(self, player: BasePlayer, is_new=False) -> List[GameEvent]:
+        scen_data = self.state.shared_data["scenario"]
+        all_facts_dict = scen_data["all_facts"]
+        all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
+        text = DetectiveUtils.get_private_dashboard(player, all_facts_objs)
+        kb = DetectiveUtils.get_inventory_keyboard(player, all_facts_objs)
+        token = f"dash_{player.id}"
+        if is_new:
+            return [GameEvent(type="message", target_ids=[player.id], content=text, reply_markup=kb, token=token,
+                              extra_data={"is_dashboard": True})]
+        else:
+            return [GameEvent(type="edit_message", target_ids=[player.id], content=text, reply_markup=kb, token=token)]
+
+    # --- ABSTRACT METHODS IMPLEMENTATION ---
+
+    def get_player_view(self, viewer_id: int) -> str:
+        return "Detective View"
+
+    async def player_leave(self, player_id: int) -> List[GameEvent]:
+        p = next((x for x in self.players if x.id == player_id), None)
+        if not p: return []
+        char_name = p.attributes["detective_profile"].character_name
+        return [GameEvent(type="message", content=f"🚪 {char_name} покинул комнату...")]

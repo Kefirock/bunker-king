@@ -1,4 +1,5 @@
 import asyncio
+import random
 from collections import Counter
 from typing import List, Dict
 
@@ -42,7 +43,7 @@ class DetectiveGame(GameEngine):
             for i, b_name in enumerate(bot_names):
                 self.players.append(BasePlayer(id=-100 - i, name=b_name, is_human=False))
 
-        import random
+        # Перемешивание (random уже импортирован наверху)
         random.shuffle(self.players)
 
         names = [p.name for p in self.players]
@@ -71,7 +72,7 @@ class DetectiveGame(GameEngine):
         events.append(GameEvent(type="message", content=f"🕵️‍♂️ <b>ДЕЛО: {scenario.title}</b>\n{scenario.description}"))
         events.append(GameEvent(type="message", content=f"👥 <b>Участники:</b> {', '.join(names)}"))
 
-        # При старте дашборды не шлем, они придут с первым ходом в process_turn
+        # При старте дашборды не шлем, они придут с первым ходом
         return events
 
     # --- GAME LOOP ---
@@ -107,13 +108,13 @@ class DetectiveGame(GameEngine):
             # 1. Генерируем свежие мысли
             await self._refresh_suggestions(current_player, silent=True)
 
-            # 2. Формируем НОВЫЙ дашборд (message, не edit)
+            # 2. Формируем НОВЫЙ дашборд
             dash_events = self._create_dashboard_update(current_player, is_new=True)
 
             # 3. Инструкция
             msg = "👉 <b>ВАШ ХОД!</b> Используйте панель ниже ⬇️"
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
-            events.extend(dash_events)  # Само сообщение дашборда
+            events.extend(dash_events)
 
             # Уведомление другим
             others = [p.id for p in self.players if p.id != current_player.id]
@@ -188,7 +189,6 @@ class DetectiveGame(GameEngine):
         is_my_turn = (p.id == active_player.id)
 
         if action_data.startswith("preview_"):
-            # Preview доступен всегда (даже не в свой ход, чтобы почитать карты)
             fid = action_data.split("_")[1]
             return self._preview_fact(p, fid)
 
@@ -231,7 +231,6 @@ class DetectiveGame(GameEngine):
     async def _reveal_fact(self, player: BasePlayer, fact_id: str) -> List[GameEvent]:
         prof: DetectivePlayerProfile = player.attributes["detective_profile"]
 
-        # ЛИМИТ ВСКРЫТИЯ (2 ШТ)
         if prof.published_facts_count >= 2:
             return [GameEvent(type="callback_answer", target_ids=[player.id], content="⛔ Лимит исчерпан (макс 2)")]
 
@@ -259,8 +258,6 @@ class DetectiveGame(GameEngine):
         events.append(GameEvent(type="message", content=msg))
         events.append(GameEvent(type="callback_answer", target_ids=[player.id], content="Опубликовано!"))
 
-        # Обновляем ДАШБОРД только текущему игроку (убираем кнопку),
-        # остальным не надо, так как у них дашборда нет (эпизодический UI)
         if player.is_human:
             events.extend(self._create_dashboard_update(player, is_new=False))
 
@@ -279,9 +276,6 @@ class DetectiveGame(GameEngine):
         player.attributes["detective_profile"].last_suggestions = sugg
         return []
 
-    # Методы голосования (_start_voting, _process_voting_turn, _handle_human_vote, _finish_game)
-    # остаются без изменений (они уже есть в вашем файле или возьмите из пред. ответов)
-    # Для экономии места я их свернул, но они обязаны быть.
     async def _start_voting(self) -> List[GameEvent]:
         self.state.phase = GamePhase.FINAL_VOTE
         self.votes = {}
@@ -304,17 +298,19 @@ class DetectiveGame(GameEngine):
         all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
         pub_ids = self.state.shared_data["public_facts"]
         pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
+
         for p in self.players:
             if not p.is_human and p.name not in self.votes:
                 vote_target = await self.bot_agent.make_vote(p, self.players, scen_data, self.state.history, pub_facts)
                 self.votes[p.name] = vote_target
+
         if len(self.votes) == len(self.players):
             events.extend(await self._finish_game())
         return events
 
     async def _handle_human_vote(self, player: BasePlayer, target_name: str) -> List[GameEvent]:
-        if player.name in self.votes: return [
-            GameEvent(type="callback_answer", target_ids=[player.id], content="Принято")]
+        if player.name in self.votes:
+            return [GameEvent(type="callback_answer", target_ids=[player.id], content="Голос уже принят")]
         self.votes[player.name] = target_name
         events = [
             GameEvent(type="callback_answer", target_ids=[player.id], content=f"Выбор: {target_name}"),
@@ -355,16 +351,4 @@ class DetectiveGame(GameEngine):
         all_facts_dict = scen_data["all_facts"]
         all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
         text = DetectiveUtils.get_private_dashboard(player, all_facts_objs)
-        kb = DetectiveUtils.get_inventory_keyboard(player, all_facts_objs)
-        token = f"dash_{player.id}"
-        if is_new:
-            return [GameEvent(type="message", target_ids=[player.id], content=text, reply_markup=kb, token=token,
-                              extra_data={"is_dashboard": True})]
-        else:
-            return [GameEvent(type="edit_message", target_ids=[player.id], content=text, reply_markup=kb, token=token)]
-
-    def get_player_view(self, viewer_id: int) -> str:
-        return "Detective View"
-
-    async def player_leave(self, player_id: int) -> List[GameEvent]:
-        return [GameEvent(type="message", content="Игрок ушел...")]
+        kb = DetectiveUtils.get_inventory_keyboard(player, all_facts_objs

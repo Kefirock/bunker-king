@@ -1,3 +1,4 @@
+import random
 from typing import List, Dict
 from src.core.schemas import BasePlayer
 from src.games.detective.schemas import Fact, DetectivePlayerProfile, FactType, RoleType
@@ -14,7 +15,7 @@ FACT_TYPE_ICONS = {
     FactType.ALIBI: "📍"
 }
 
-# ДОБАВЛЕНО: Словарь имен типов (исправление ошибки ImportError)
+# Словарь имен типов
 FACT_TYPE_NAMES = {
     FactType.PHYSICAL: "Вещдок",
     FactType.TESTIMONY: "Показания",
@@ -32,6 +33,8 @@ BOT_NAMES_POOL = [
 class DetectiveUtils:
     @staticmethod
     def get_bot_names(count: int) -> List[str]:
+        """Возвращает случайные уникальные имена для ботов"""
+        # Здесь используется random, поэтому импорт обязателен
         return random.sample(BOT_NAMES_POOL, min(count, len(BOT_NAMES_POOL)))
 
     @staticmethod
@@ -79,7 +82,8 @@ class DetectiveUtils:
         prof: DetectivePlayerProfile = player.attributes.get("detective_profile")
         kb = []
 
-        # Кнопки фактов (ТОЛЬКО ФАКТЫ, БЕЗ REFRESH)
+        # Кнопка обновления мыслей удалена намеренно
+
         for fid in prof.inventory:
             fact = all_facts.get(fid)
             if fact and not fact.is_public:

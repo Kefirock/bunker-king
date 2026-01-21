@@ -42,11 +42,9 @@ class DetectiveGame(GameEngine):
         for u in users_data:
             is_human = u["id"] > 0 or u["id"] < -50000
             p = BasePlayer(id=u["id"], name=u["name"], is_human=is_human)
-            # Сразу присваиваем профиль или пустой, если не найден
             p.attributes["detective_profile"] = profiles_map.get(u["name"], DetectivePlayerProfile())
             self.players.append(p)
 
-        # Авто-заполнение ботами из конфига
         target_players = detective_cfg.gameplay.get("setup", {}).get("total_players", 5)
 
         if len(self.players) < target_players:
@@ -58,14 +56,12 @@ class DetectiveGame(GameEngine):
         import random
         random.shuffle(self.players)
 
-        # Перегенерация сценария под полный состав (чтобы у ботов были роли)
         full_names = [p.name for p in self.players]
         try:
             scenario, profiles_map = await self.scenario_gen.generate(full_names)
         except ScenarioGenerationError:
             return [GameEvent(type="game_over", content="Ошибка генерации ролей для ботов.")]
 
-        # Обновляем профили с учетом новых ролей
         for p in self.players:
             p.attributes["detective_profile"] = profiles_map.get(p.name, DetectivePlayerProfile())
 
@@ -84,7 +80,6 @@ class DetectiveGame(GameEngine):
         events = []
         events.append(GameEvent(type="message", content=f"🕵️‍♂️ <b>ДЕЛО: {scenario.title}</b>\n{scenario.description}"))
 
-        # Список персонажей
         char_names = [p.attributes["detective_profile"].character_name for p in self.players]
         events.append(GameEvent(type="message", content=f"👥 <b>В ролях:</b>\n" + ", ".join(char_names)))
 
@@ -100,7 +95,6 @@ class DetectiveGame(GameEngine):
 
         if not self.players: return []
 
-        # Нарратор (раз в круг)
         events = []
         if self.current_turn_index == 0 and len(self.state.history) > 3:
             scen_title = self.state.shared_data["scenario"]["title"]
@@ -111,10 +105,8 @@ class DetectiveGame(GameEngine):
         self.current_turn_index = self.current_turn_index % len(self.players)
         current_player = self.players[self.current_turn_index]
 
-        # Имя персонажа для уведомлений
         char_name = current_player.attributes["detective_profile"].character_name
 
-        # ХОД БОТА
         if not current_player.is_human:
             t_count = self.state.shared_data["turn_count"]
             msg_token = f"turn_{t_count}_{current_player.id}"
@@ -123,17 +115,13 @@ class DetectiveGame(GameEngine):
             events.append(GameEvent(type="message", content=f"⏳ <b>{char_name}</b> пишет...", token=msg_token))
             events.append(GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id}))
             return events
-
-        # ХОД ЧЕЛОВЕКА
         else:
             msg = "👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат, чтобы завершить ход."
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
 
-            # Эпизодический UI (Новая панель)
             await self._refresh_suggestions(current_player, silent=True)
             events.extend(self._create_dashboard_update(current_player, is_new=True))
 
-            # Уведомление другим
             others = [p.id for p in self.players if p.id != current_player.id]
             if others:
                 events.append(GameEvent(
@@ -165,7 +153,6 @@ class DetectiveGame(GameEngine):
             reveal_events = await self._reveal_fact(bot, fact_to_reveal)
             events.extend(reveal_events)
 
-        # Пишем в историю имя персонажа
         char_name = bot.attributes["detective_profile"].character_name
         self.state.history.append(f"[{char_name}]: {speech}")
 
@@ -196,7 +183,6 @@ class DetectiveGame(GameEngine):
                 content=f"⚠️ <b>Не ваш ход!</b> Сейчас говорит {active_char}."
             )]
 
-        # Пишем в историю имя персонажа
         my_char = p.attributes["detective_profile"].character_name
         self.state.history.append(f"[{my_char}]: {text}")
 
@@ -370,8 +356,3 @@ class DetectiveGame(GameEngine):
 
         if winner_name == real_killer.name:
             report += "🎉 <b>ПОБЕДА ДЕТЕКТИВОВ!</b> Преступник пойман."
-        else:
-            report += "💀 <b>ПОБЕДА УБИЙЦЫ!</b> Вы обвинили невиновного."
-
-        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n{scen_data['true_solution']}"
-        events.app

@@ -25,7 +25,7 @@ class GamePhase(str, Enum):
 class Fact(BaseModel):
     id: str
     text: str
-    keyword: str = "Улика"  # НОВОЕ ПОЛЕ: Краткое название (1-3 слова)
+    keyword: str = "Улика"
     type: FactType
     is_public: bool = False
     source_player_id: Optional[int] = None
@@ -36,6 +36,7 @@ class SuggestionData(BaseModel):
     bluff_text: str
 
 class DetectivePlayerProfile(BaseModel):
+    character_name: str = "Неизвестный" # НОВОЕ ПОЛЕ: Имя персонажа по сюжету
     role: RoleType = RoleType.INNOCENT
     bio: str = ""
     secret_objective: str = ""

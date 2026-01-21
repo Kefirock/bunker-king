@@ -127,10 +127,18 @@ async def broadcast_lobby_ui(lobby: Lobby):
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
     game = active_games.get(context_id)
+    # Если игры уже нет (удалена после game_over), но события есть - пытаемся отправить их
+    # Но для этого нужны ID игроков. Если game is None, сложно.
+    # В текущей логике game удаляется ПОСЛЕ обработки game_over в этом методе.
     if not game: return
+
+    should_delete_game = False
 
     for event in events:
         try:
+            if event.type == "game_over":
+                should_delete_game = True
+
             if event.type in ["message", "bot_think"]:
                 targets = [p.id for p in game.players if p.is_human and p.is_alive]
                 for tid in targets:
@@ -213,11 +221,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                     s3_path = game.logger.get_s3_target_path()
                     asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path))
 
-                if game.lobby_id in active_games: del active_games[game.lobby_id]
-                if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
-                lobby_manager.delete_lobby(game.lobby_id)
-                return
-
             elif event.type == "switch_turn":
                 await asyncio.sleep(0.5)
                 new_events = await game.process_turn()
@@ -229,6 +232,12 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
         except Exception as e:
             logging.error(f"Event Error ({event.type}): {e}")
+
+    # Удаляем игру только после обработки всех событий
+    if should_delete_game:
+        if game.lobby_id in active_games: del active_games[game.lobby_id]
+        if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
+        lobby_manager.delete_lobby(game.lobby_id)
 
 
 # === COMMANDS ===
@@ -257,13 +266,10 @@ async def cmd_fake_say(message: Message, command: CommandObject):
     game = active_games[lid]
     text = command.args
     if not text: return
-    # Простое нахождение активного
     active_list = [p for p in game.players if p.is_alive]
-    # (Для бункера нужен фильтр runoff, для детектива нет)
     if hasattr(game, "state") and game.state.phase == "runoff":
         candidates = game.state.shared_data.get("runoff_candidates", [])
         active_list = [p for p in active_list if p.name in candidates]
-
     if hasattr(game, "current_turn_index"):
         idx = game.current_turn_index % len(active_list) if active_list else 0
         current_player = active_list[idx]
@@ -300,6 +306,28 @@ async def cmd_skip(message: Message):
     if lid and lid in active_games:
         await process_game_events(lid, [GameEvent(type="switch_turn")])
         await message.reply("⏩ Ход пропущен.")
+
+
+@router.message(Command("vote_as"))
+async def cmd_vote_as(message: Message, command: CommandObject):
+    chat_id = message.chat.id
+    lid = lobby_manager.user_to_lobby.get(chat_id)
+    if not lid and str(chat_id) in active_games: lid = str(chat_id)
+    if not lid or lid not in active_games: return
+    game = active_games[lid]
+    is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
+    if not is_admin: return
+    args = command.args.split(maxsplit=1) if command.args else []
+    if len(args) < 2: return
+    voter_name = args[0]
+    target_name = args[1]
+    voter = next((p for p in game.players if voter_name.lower() in p.name.lower()), None)
+    if not voter: return
+    action_data = f"vote_{target_name}"
+    events = await game.handle_action(player_id=voter.id, action_data=action_data)
+    if events:
+        await message.reply(f"✅ Голос: {voter.name} -> {target_name}")
+        await process_game_events(game.lobby_id, events)
 
 
 # === UI HANDLERS ===
@@ -366,13 +394,22 @@ async def start_solo_handler(callback: CallbackQuery):
 
     events = await game.init_game([{"id": user.id, "name": user.first_name}])
 
+    # ПРОВЕРКА НА ОШИБКУ ИНИЦИАЛИЗАЦИИ (Crash Fix)
+    is_failed = False
     for e in events:
-        if e.type == "update_dashboard":
-            e.type = "message"
-            e.extra_data["is_dashboard"] = True
+        if e.type == "game_over":
+            is_failed = True
+
     await process_game_events(lid, events)
-    turn_events = await game.process_turn()
-    await process_game_events(lid, turn_events)
+
+    # Если игра не стартанула, не запускаем цикл
+    if not is_failed:
+        for e in events:
+            if e.type == "update_dashboard":
+                e.type = "message"
+                e.extra_data["is_dashboard"] = True
+        turn_events = await game.process_turn()
+        await process_game_events(lid, turn_events)
 
 
 @router.callback_query(F.data.startswith("lobby_create_"))
@@ -477,13 +514,21 @@ async def lobby_start_handler(callback: CallbackQuery):
 
     events = await game.init_game(users_data)
 
+    # ПРОВЕРКА НА ОШИБКУ (Crash Fix)
+    is_failed = False
     for e in events:
-        if e.type == "update_dashboard":
-            e.type = "message"
-            e.extra_data["is_dashboard"] = True
+        if e.type == "game_over":
+            is_failed = True
+
     await process_game_events(lobby_id, events)
-    turn_events = await game.process_turn()
-    await process_game_events(lobby_id, turn_events)
+
+    if not is_failed:
+        for e in events:
+            if e.type == "update_dashboard":
+                e.type = "message"
+                e.extra_data["is_dashboard"] = True
+        turn_events = await game.process_turn()
+        await process_game_events(lobby_id, turn_events)
 
 
 @router.message()
@@ -502,7 +547,6 @@ async def chat_message_handler(message: Message):
     await process_game_events(game.lobby_id, events)
 
 
-# ИСПРАВЛЕННЫЙ ХЕНДЛЕР: ловит ВСЁ (vote_, preview_, reveal_, refresh_)
 @router.callback_query(
     F.data.func(lambda data: any(data.startswith(p) for p in ["vote_", "preview_", "reveal_", "refresh_"])))
 async def game_action_handler(callback: CallbackQuery):

@@ -1,3 +1,4 @@
+import random
 from typing import List, Dict
 from src.core.schemas import BasePlayer
 from src.games.detective.schemas import Fact, DetectivePlayerProfile, FactType, RoleType
@@ -14,8 +15,20 @@ FACT_TYPE_ICONS = {
     FactType.ALIBI: "📍"
 }
 
+# Список имен для ботов в стиле детективов
+BOT_NAMES_POOL = [
+    "Доктор Мортимер", "Леди Эшли", "Полковник Мастард", "Мисс Скарлетт",
+    "Профессор Плам", "Дворецкий Бэрримор", "Инспектор Лестрейд",
+    "Графиня Валевска", "Капитан Гастингс", "Миссис Хадсон"
+]
+
 
 class DetectiveUtils:
+    @staticmethod
+    def get_bot_names(count: int) -> List[str]:
+        """Возвращает случайные уникальные имена для ботов"""
+        return random.sample(BOT_NAMES_POOL, min(count, len(BOT_NAMES_POOL)))
+
     @staticmethod
     def get_public_board_text(scenario_title: str, public_facts: List[Fact]) -> str:
         header = f"📁 <b>ДЕЛО: {scenario_title}</b>\n"
@@ -53,7 +66,6 @@ class DetectiveUtils:
             if sugg.bluff_text: text += f"🎭 <i>Хитрость:</i> <code>{sugg.bluff_text[:50]}...</code>\n"
             text += "<i>(Нажмите на текст, чтобы скопировать)</i>\n"
 
-        # ИСПРАВЛЕНО: Инструкция перенесена сюда
         text += "\n👇 <b>ВАШ ИНВЕНТАРЬ:</b>\n<i>(Нажмите на кнопку, чтобы осмотреть улику перед публикацией)</i>"
         return text
 
@@ -62,16 +74,18 @@ class DetectiveUtils:
         prof: DetectivePlayerProfile = player.attributes.get("detective_profile")
         kb = []
 
-        count = 1
+        # Кнопка обновления мыслей (на всякий случай, если авто не сработало)
+        kb.append({"text": "🔄 Обновить мысли", "callback_data": "refresh_suggestions"})
+
         for fid in prof.inventory:
             fact = all_facts.get(fid)
             if fact and not fact.is_public:
                 icon = FACT_TYPE_ICONS.get(fact.type, "📄")
                 btn_text = f"{icon} {fact.keyword}"
                 kb.append({"text": btn_text, "callback_data": f"preview_{fid}"})
-                count += 1
 
-        if count == 1:
-            kb.append({"text": "📭 Пусто", "callback_data": "dummy_empty"})
+        if not kb or (len(kb) == 1 and kb[0]["callback_data"] == "refresh_suggestions"):
+            # Если фактов нет, добавляем пустышку, чтобы меню не схлопнулось странно
+            pass
 
         return kb

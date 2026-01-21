@@ -197,8 +197,11 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
             elif event.type == "callback_answer":
                 if event.target_ids and event.target_ids[0] > 0:
-                    await bot.answer_callback_query(callback_query_id=event.extra_data.get("query_id"),
-                                                    text=event.content)
+                    try:
+                        await bot.answer_callback_query(callback_query_id=event.extra_data.get("query_id"),
+                                                        text=event.content)
+                    except:
+                        pass
 
             elif event.type == "game_over":
                 targets = [p.id for p in game.players if p.is_human]
@@ -228,7 +231,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             logging.error(f"Event Error ({event.type}): {e}")
 
 
-# === ADMIN COMMANDS ===
+# === COMMANDS ===
 
 @router.message(Command("fake_join"))
 async def cmd_fake_join(message: Message, command: CommandObject):
@@ -254,17 +257,18 @@ async def cmd_fake_say(message: Message, command: CommandObject):
     game = active_games[lid]
     text = command.args
     if not text: return
+    # Простое нахождение активного
     active_list = [p for p in game.players if p.is_alive]
+    # (Для бункера нужен фильтр runoff, для детектива нет)
     if hasattr(game, "state") and game.state.phase == "runoff":
         candidates = game.state.shared_data.get("runoff_candidates", [])
         active_list = [p for p in active_list if p.name in candidates]
-    if game.current_turn_index >= len(active_list): return
-    current_player = active_list[game.current_turn_index]
-    if current_player.id > 0:
-        await message.reply(f"Сейчас ход реального игрока {current_player.name}.")
-        return
-    events = await game.process_message(player_id=current_player.id, text=text)
-    await process_game_events(game.lobby_id, events)
+
+    if hasattr(game, "current_turn_index"):
+        idx = game.current_turn_index % len(active_list) if active_list else 0
+        current_player = active_list[idx]
+        events = await game.process_message(player_id=current_player.id, text=text)
+        await process_game_events(game.lobby_id, events)
 
 
 @router.message(Command("kick"))
@@ -298,29 +302,7 @@ async def cmd_skip(message: Message):
         await message.reply("⏩ Ход пропущен.")
 
 
-@router.message(Command("vote_as"))
-async def cmd_vote_as(message: Message, command: CommandObject):
-    chat_id = message.chat.id
-    lid = lobby_manager.user_to_lobby.get(chat_id)
-    if not lid and str(chat_id) in active_games: lid = str(chat_id)
-    if not lid or lid not in active_games: return
-    game = active_games[lid]
-    is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
-    if not is_admin: return
-    args = command.args.split(maxsplit=1) if command.args else []
-    if len(args) < 2: return
-    voter_name = args[0]
-    target_name = args[1]
-    voter = next((p for p in game.players if voter_name.lower() in p.name.lower()), None)
-    if not voter: return
-    action_data = f"vote_{target_name}"
-    events = await game.handle_action(player_id=voter.id, action_data=action_data)
-    if events:
-        await message.reply(f"✅ Голос: {voter.name} -> {target_name}")
-        await process_game_events(game.lobby_id, events)
-
-
-# === UI HANDLERS (DYNAMIC) ===
+# === UI HANDLERS ===
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
@@ -520,8 +502,7 @@ async def chat_message_handler(message: Message):
     await process_game_events(game.lobby_id, events)
 
 
-# ИСПРАВЛЕННЫЙ ХЕНДЛЕР ДЛЯ ИГРОВЫХ ДЕЙСТВИЙ
-# Ловит preview_, reveal_, refresh_, vote_
+# ИСПРАВЛЕННЫЙ ХЕНДЛЕР: ловит ВСЁ (vote_, preview_, reveal_, refresh_)
 @router.callback_query(
     F.data.func(lambda data: any(data.startswith(p) for p in ["vote_", "preview_", "reveal_", "refresh_"])))
 async def game_action_handler(callback: CallbackQuery):
@@ -545,10 +526,8 @@ async def main():
     asyncio.create_task(cleanup_lobbies_task())
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        # --- AUTO DISCOVERY START ---
         GameRegistry.auto_discover()
         print("✅ Core System Online. Games loaded: " + ", ".join(GameRegistry.get_all_games().keys()))
-        # --- AUTO DISCOVERY END ---
         await dp.start_polling(bot)
     finally:
         await bot.session.close()

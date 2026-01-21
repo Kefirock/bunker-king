@@ -1,5 +1,4 @@
 import asyncio
-import random
 from collections import Counter
 from typing import List, Dict
 
@@ -30,52 +29,33 @@ class DetectiveGame(GameEngine):
         self.votes = {}
 
     async def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
-        # 1. СОЗДАНИЕ ИГРОКОВ (ЛЮДИ + БОТЫ)
+        # 1. Формируем список (Люди + Боты)
         self.players = []
-
-        # Добавляем людей
         for u in users_data:
-            # ID < 0 но > -50000 это боты, ID < -50000 это фейки админа (считаем их людьми для теста)
             is_human = u["id"] > 0 or u["id"] < -50000
             self.players.append(BasePlayer(id=u["id"], name=u["name"], is_human=is_human))
 
-        # Авто-заполнение ботами до 4-5 человек
         target_players = 4
-        current_count = len(self.players)
-
-        if current_count < target_players:
-            needed = target_players - current_count
+        if len(self.players) < target_players:
+            needed = target_players - len(self.players)
             bot_names = DetectiveUtils.get_bot_names(needed)
-
             for i, b_name in enumerate(bot_names):
-                # ID для ботов: -100, -101...
-                bot_id = -100 - i
-                self.players.append(BasePlayer(id=bot_id, name=b_name, is_human=False))
+                self.players.append(BasePlayer(id=-100 - i, name=b_name, is_human=False))
 
-        # 2. ПЕРЕМЕШИВАНИЕ (ВАЖНО!)
-        # Перемешиваем список игроков ПЕРЕД генерацией сценария.
-        # Это гарантирует, что убийцей может стать кто угодно, и порядок хода будет случайным.
+        import random
         random.shuffle(self.players)
 
-        # 3. ГЕНЕРАЦИЯ СЦЕНАРИЯ
-        # Собираем имена уже перемешанных игроков
         names = [p.name for p in self.players]
 
+        # 2. Генерируем сценарий
         try:
             scenario, profiles_map = await self.scenario_gen.generate(names)
         except ScenarioGenerationError as e:
             return [GameEvent(type="game_over", content=f"❌ Ошибка сценария: {e}")]
 
-        # 4. ПРИСВОЕНИЕ ПРОФИЛЕЙ
         for p in self.players:
-            prof = profiles_map.get(p.name)
-            if prof:
-                p.attributes["detective_profile"] = prof
-            else:
-                # Fallback, если что-то пошло не так
-                p.attributes["detective_profile"] = DetectivePlayerProfile()
+            p.attributes["detective_profile"] = profiles_map.get(p.name, DetectivePlayerProfile())
 
-        # 5. ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ
         self.state = BaseGameState(
             game_id=self.lobby_id,
             round=1,
@@ -89,18 +69,9 @@ class DetectiveGame(GameEngine):
 
         events = []
         events.append(GameEvent(type="message", content=f"🕵️‍♂️ <b>ДЕЛО: {scenario.title}</b>\n{scenario.description}"))
+        events.append(GameEvent(type="message", content=f"👥 <b>Участники:</b> {', '.join(names)}"))
 
-        # Список участников
-        players_list = ", ".join([p.name for p in self.players])
-        events.append(GameEvent(type="message", content=f"👥 <b>Участники:</b> {players_list}"))
-        events.append(GameEvent(type="message", content="💡 <i>Игра началась. Говорим по очереди!</i>"))
-
-        # Дашборды только людям
-        for p in self.players:
-            if p.is_human:
-                await self._refresh_suggestions(p, silent=True)
-                events.extend(self._create_dashboard_update(p, is_new=True))
-
+        # При старте дашборды не шлем, они придут с первым ходом в process_turn
         return events
 
     # --- GAME LOOP ---
@@ -111,7 +82,7 @@ class DetectiveGame(GameEngine):
 
         if not self.players: return []
 
-        # Нарратор в начале круга (когда индекс снова 0)
+        # Нарратор (раз в круг)
         events = []
         if self.current_turn_index == 0 and len(self.state.history) > 3:
             scen_title = self.state.shared_data["scenario"]["title"]
@@ -119,7 +90,6 @@ class DetectiveGame(GameEngine):
             if narrative:
                 events.append(GameEvent(type="message", content=narrative))
 
-        # Безопасное получение игрока
         self.current_turn_index = self.current_turn_index % len(self.players)
         current_player = self.players[self.current_turn_index]
 
@@ -132,15 +102,27 @@ class DetectiveGame(GameEngine):
             events.append(GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id}))
             return events
 
-        # ЧЕЛОВЕК
+        # ЧЕЛОВЕК - ЭПИЗОДИЧЕСКИЙ UI
         else:
-            msg = "👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат."
-            events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
+            # 1. Генерируем свежие мысли
+            await self._refresh_suggestions(current_player, silent=True)
 
+            # 2. Формируем НОВЫЙ дашборд (message, не edit)
+            dash_events = self._create_dashboard_update(current_player, is_new=True)
+
+            # 3. Инструкция
+            msg = "👉 <b>ВАШ ХОД!</b> Используйте панель ниже ⬇️"
+            events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
+            events.extend(dash_events)  # Само сообщение дашборда
+
+            # Уведомление другим
             others = [p.id for p in self.players if p.id != current_player.id]
             if others:
-                events.append(
-                    GameEvent(type="message", target_ids=others, content=f"⏳ Ходит <b>{current_player.name}</b>..."))
+                events.append(GameEvent(
+                    type="message",
+                    target_ids=others,
+                    content=f"⏳ Ходит <b>{current_player.name}</b>..."
+                ))
             return events
 
     async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
@@ -205,21 +187,17 @@ class DetectiveGame(GameEngine):
         active_player = self.players[self.current_turn_index % len(self.players)]
         is_my_turn = (p.id == active_player.id)
 
-        # 1. PREVIEW (МОЖНО ВСЕГДА)
         if action_data.startswith("preview_"):
+            # Preview доступен всегда (даже не в свой ход, чтобы почитать карты)
             fid = action_data.split("_")[1]
             return self._preview_fact(p, fid)
 
-        # 2. REVEAL (ТОЛЬКО В СВОЙ ХОД)
         elif action_data.startswith("reveal_"):
             if not is_my_turn:
                 return [GameEvent(type="callback_answer", target_ids=[player_id], content="Только в свой ход!")]
+
             fid = action_data.split("_")[1]
             return await self._reveal_fact(p, fid)
-
-        # 3. REFRESH (МОЖНО ВСЕГДА)
-        elif action_data == "refresh_suggestions":
-            return await self._refresh_suggestions(p)
 
         elif action_data.startswith("vote_"):
             return await self._handle_human_vote(p, action_data.split("_")[1])
@@ -251,18 +229,21 @@ class DetectiveGame(GameEngine):
         ]
 
     async def _reveal_fact(self, player: BasePlayer, fact_id: str) -> List[GameEvent]:
+        prof: DetectivePlayerProfile = player.attributes["detective_profile"]
+
+        # ЛИМИТ ВСКРЫТИЯ (2 ШТ)
+        if prof.published_facts_count >= 2:
+            return [GameEvent(type="callback_answer", target_ids=[player.id], content="⛔ Лимит исчерпан (макс 2)")]
+
         scen_data = self.state.shared_data["scenario"]
         all_facts = scen_data["all_facts"]
         fact = all_facts.get(fact_id)
-
         if not fact: return []
         if fact["is_public"]:
             return [GameEvent(type="callback_answer", target_ids=[player.id], content="Уже вскрыто!")]
 
         fact["is_public"] = True
         self.state.shared_data["public_facts"].append(fact_id)
-
-        prof = player.attributes["detective_profile"]
         prof.published_facts_count += 1
 
         events = []
@@ -278,10 +259,10 @@ class DetectiveGame(GameEngine):
         events.append(GameEvent(type="message", content=msg))
         events.append(GameEvent(type="callback_answer", target_ids=[player.id], content="Опубликовано!"))
 
-        for p in self.players:
-            if p.is_human:
-                await self._refresh_suggestions(p, silent=True)
-                events.extend(self._create_dashboard_update(p))
+        # Обновляем ДАШБОРД только текущему игроку (убираем кнопку),
+        # остальным не надо, так как у них дашборда нет (эпизодический UI)
+        if player.is_human:
+            events.extend(self._create_dashboard_update(player, is_new=False))
 
         return events
 
@@ -296,13 +277,11 @@ class DetectiveGame(GameEngine):
             player, self.state.history, pub_facts, all_facts_objs
         )
         player.attributes["detective_profile"].last_suggestions = sugg
+        return []
 
-        if silent: return []
-        # Если не silent, обновляем и сообщение дашборда
-        events = [GameEvent(type="callback_answer", target_ids=[player.id], content="Мысли обновлены")]
-        events.extend(self._create_dashboard_update(player))
-        return events
-
+    # Методы голосования (_start_voting, _process_voting_turn, _handle_human_vote, _finish_game)
+    # остаются без изменений (они уже есть в вашем файле или возьмите из пред. ответов)
+    # Для экономии места я их свернул, но они обязаны быть.
     async def _start_voting(self) -> List[GameEvent]:
         self.state.phase = GamePhase.FINAL_VOTE
         self.votes = {}
@@ -325,19 +304,17 @@ class DetectiveGame(GameEngine):
         all_facts_objs = {k: Fact(**v) for k, v in all_facts_dict.items()}
         pub_ids = self.state.shared_data["public_facts"]
         pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
-
         for p in self.players:
             if not p.is_human and p.name not in self.votes:
                 vote_target = await self.bot_agent.make_vote(p, self.players, scen_data, self.state.history, pub_facts)
                 self.votes[p.name] = vote_target
-
         if len(self.votes) == len(self.players):
             events.extend(await self._finish_game())
         return events
 
     async def _handle_human_vote(self, player: BasePlayer, target_name: str) -> List[GameEvent]:
-        if player.name in self.votes:
-            return [GameEvent(type="callback_answer", target_ids=[player.id], content="Голос уже принят")]
+        if player.name in self.votes: return [
+            GameEvent(type="callback_answer", target_ids=[player.id], content="Принято")]
         self.votes[player.name] = target_name
         events = [
             GameEvent(type="callback_answer", target_ids=[player.id], content=f"Выбор: {target_name}"),
@@ -390,4 +367,4 @@ class DetectiveGame(GameEngine):
         return "Detective View"
 
     async def player_leave(self, player_id: int) -> List[GameEvent]:
-        return [GameEvent(type="message", content="Игрок ушел, но расследование продолжается...")]
+        return [GameEvent(type="message", content="Игрок ушел...")]

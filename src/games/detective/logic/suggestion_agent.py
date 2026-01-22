@@ -28,7 +28,9 @@ class SuggestionAgent:
 
         prompt = prompt_template.format(
             role=prof.role,
-            character_name=prof.character_name,  # <-- Передаем имя персонажа
+            character_name=prof.character_name,
+            archetype=prof.archetype,  # <--- НОВОЕ
+            relationships=prof.relationships,  # <--- НОВОЕ
             bio=prof.bio,
             objective=prof.secret_objective,
             public_facts=pub_txt,

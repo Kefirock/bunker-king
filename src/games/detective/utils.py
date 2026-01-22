@@ -14,7 +14,6 @@ FACT_TYPE_ICONS = {
     FactType.ALIBI: "📍"
 }
 
-# Словарь имен типов
 FACT_TYPE_NAMES = {
     FactType.PHYSICAL: "Вещдок",
     FactType.TESTIMONY: "Показания",
@@ -54,27 +53,33 @@ class DetectiveUtils:
 
         role_str = ROLE_MAP.get(prof.role, str(prof.role))
 
-        # ИСПРАВЛЕНО: Добавлено отображение Имени Персонажа
+        # БЛОК 1: Основное Досье
         text = (
             f"🎭 <b>ВАШ ПЕРСОНАЖ:</b> {prof.character_name}\n"
+            f"🧠 <b>Характер:</b> {prof.archetype}\n"
             f"🏷 <b>Статус:</b> {role_str}\n"
             f"🎯 <b>Цель:</b> {prof.secret_objective}\n"
             f"📜 <b>Легенда:</b> <i>{prof.bio}</i>\n\n"
         )
 
+        # БЛОК 2: Связи (НОВОЕ)
+        if prof.relationships and prof.relationships != "Нет связей":
+            text += f"🔗 <b>СВЯЗИ:</b>\n<i>{prof.relationships}</i>\n\n"
+
+        # БЛОК 3: Статус участия
         done = prof.published_facts_count
         status = "✅ Выполнено" if done >= 2 else f"⚠️ Осталось вскрыть: <b>{2 - done}</b>"
         text += f"📊 <b>Вклад:</b> {status}\n\n"
 
+        # БЛОК 4: Подсказки (Краткие)
         sugg = prof.last_suggestions
         if sugg:
-            text += "💡 <b>ПОДСКАЗКИ:</b>\n"
-            if sugg.logic_text: text += f"🔹 <i>Логика:</i> <code>{sugg.logic_text[:100]}</code>\n"
-            if sugg.defense_text: text += f"🛡 <i>Защита:</i> <code>{sugg.defense_text[:100]}</code>\n"
-            if sugg.bluff_text: text += f"🎭 <i>Хитрость:</i> <code>{sugg.bluff_text[:100]}</code>\n"
-            text += "<i>(Нажмите на текст, чтобы скопировать)</i>\n"
+            text += "💡 <b>СОВЕТЫ (Нажми, чтобы скопировать):</b>\n"
+            if sugg.logic_text: text += f"🔹 <code>{sugg.logic_text}</code>\n"
+            if sugg.defense_text: text += f"🛡 <code>{sugg.defense_text}</code>\n"
+            if sugg.bluff_text: text += f"🎭 <code>{sugg.bluff_text}</code>\n"
 
-        text += "\n👇 <b>ВАШ ИНВЕНТАРЬ (Нажмите для просмотра):</b>"
+        text += "\n👇 <b>ВАШ ИНВЕНТАРЬ:</b>\n<i>(Нажмите на кнопку, чтобы осмотреть улику перед публикацией)</i>"
         return text
 
     @staticmethod

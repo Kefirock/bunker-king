@@ -85,8 +85,11 @@ class ScenarioGenerator:
             r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
+            # --- ЗАПОЛНЕНИЕ НОВЫХ ПОЛЕЙ ---
             profile = DetectivePlayerProfile(
-                character_name=char_name,  # Запоминаем имя персонажа
+                character_name=char_name,
+                archetype=role_json.get("archetype", "Обыватель"),  # <--- НОВОЕ
+                relationships=role_json.get("relationships", "Нет связей"),  # <--- НОВОЕ
                 role=role_enum,
                 bio=role_json.get("bio", ""),
                 secret_objective=role_json.get("secret", "")

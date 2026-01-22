@@ -36,7 +36,9 @@ class SuggestionData(BaseModel):
     bluff_text: str
 
 class DetectivePlayerProfile(BaseModel):
-    character_name: str = "Неизвестный" # НОВОЕ ПОЛЕ: Имя персонажа по сюжету
+    character_name: str = "Неизвестный"
+    archetype: str = "Обыватель"          # НОВОЕ: Характер (напр. "Нервный параноик")
+    relationships: str = "Нет связей"     # НОВОЕ: Описание отношений с жертвой и другими
     role: RoleType = RoleType.INNOCENT
     bio: str = ""
     secret_objective: str = ""

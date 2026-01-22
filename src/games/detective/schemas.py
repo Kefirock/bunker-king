@@ -37,8 +37,8 @@ class SuggestionData(BaseModel):
 
 class DetectivePlayerProfile(BaseModel):
     character_name: str = "Неизвестный"
-    archetype: str = "Обыватель"          # НОВОЕ: Характер (напр. "Нервный параноик")
-    relationships: str = "Нет связей"     # НОВОЕ: Описание отношений с жертвой и другими
+    archetype: str = "Обыватель"          # Характер
+    relationships: str = "Нет связей"     # Связи
     role: RoleType = RoleType.INNOCENT
     bio: str = ""
     secret_objective: str = ""

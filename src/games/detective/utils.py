@@ -53,12 +53,12 @@ class DetectiveUtils:
 
         role_str = ROLE_MAP.get(prof.role, str(prof.role))
 
-        # Обновленный формат досье
+        # Новый формат заголовка с Тэгом
         text = (
-            f"🎭 <b>ВАШ ПЕРСОНАЖ:</b> {prof.character_name}\n"
+            f"🎭 <b>{prof.character_name}</b> [{prof.tag}]\n"
             f"🏷 <b>Статус:</b> {role_str}\n"
             f"🎯 <b>Цель:</b> {prof.secret_objective}\n\n"
-            f"📜 <b>ЛЕГЕНДА:</b>\n<i>{prof.legend}</i>\n\n"
+            f"📜 <b>ЛЕГЕНДА И СВЯЗИ:</b>\n<i>{prof.legend}</i>\n\n"
         )
 
         done = prof.published_facts_count

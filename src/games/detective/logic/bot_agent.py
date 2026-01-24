@@ -14,7 +14,9 @@ class DetectiveBotAgent:
                         scenario_data: Dict,
                         history: List[str],
                         public_facts: List[Fact],
-                        all_facts_map: Dict[str, Fact]) -> Dict[str, Any]:
+                        all_facts_map: Dict[str, Fact],
+                        current_round: int,
+                        max_rounds: int) -> Dict[str, Any]:
 
         prof: DetectivePlayerProfile = bot.attributes.get("detective_profile")
         if not prof: return {}
@@ -27,7 +29,7 @@ class DetectiveBotAgent:
             if fact and not fact.is_public:
                 inv_lines.append(f"ID: {fid} | [{fact.type}] {fact.text}")
 
-        inv_str = "\n".join(inv_lines) if inv_lines else "Пусто"
+        inv_str = "\n".join(inv_lines) if inv_lines else "Пусто (или все вскрыто)"
 
         # Загружаем промпт
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
@@ -45,16 +47,23 @@ class DetectiveBotAgent:
             public_facts=pub_str,
             inventory=inv_str,
             history="\n".join(history[-10:]),
-            published_count=prof.published_facts_count
+            published_count=prof.published_facts_count,
+            current_round=current_round,  # <--- НОВОЕ
+            max_rounds=max_rounds  # <--- НОВОЕ
         )
 
         model = core_cfg.models["player_models"][0]
 
         try:
+            # Динамическая температура: выше к концу игры для драмы (от 0.7 до 0.9)
+            # Чтобы в начале они были логичными, а в конце - эмоциональными
+            temp_boost = 0.2 * (current_round / max_rounds)
+            temp = 0.7 + temp_boost
+
             response = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.85,
+                temperature=temp,
                 json_mode=True
             )
             return llm_client.parse_json(response)

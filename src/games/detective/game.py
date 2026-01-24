@@ -65,6 +65,8 @@ class DetectiveGame(GameEngine):
         for p in self.players:
             p.attributes["detective_profile"] = profiles_map.get(p.name, DetectivePlayerProfile())
 
+        max_rounds = detective_cfg.gameplay.get("setup", {}).get("max_rounds", 3)
+
         self.state = BaseGameState(
             game_id=self.lobby_id,
             round=1,
@@ -73,7 +75,9 @@ class DetectiveGame(GameEngine):
             shared_data=DetectiveStateData(
                 scenario=scenario,
                 public_facts=[],
-                turn_count=0
+                turn_count=0,
+                current_round=1,
+                max_rounds=max_rounds
             ).dict()
         )
 
@@ -83,7 +87,8 @@ class DetectiveGame(GameEngine):
         char_names = [p.attributes["detective_profile"].character_name for p in self.players]
         events.append(GameEvent(type="message", content=f"👥 <b>В ролях:</b>\n" + ", ".join(char_names)))
 
-        events.append(GameEvent(type="message", content="💡 <i>Игра началась. Говорим по очереди!</i>"))
+        events.append(GameEvent(type="message",
+                                content=f"💡 <i>Игра началась. У вас есть <b>{max_rounds} круга</b> обсуждения.</i>"))
 
         return events
 
@@ -96,17 +101,36 @@ class DetectiveGame(GameEngine):
         if not self.players: return []
 
         events = []
-        if self.current_turn_index == 0 and len(self.state.history) > 3:
-            scen_title = self.state.shared_data["scenario"]["title"]
-            narrative = await self.narrator_agent.narrate(scen_title, self.state.history)
-            if narrative:
-                events.append(GameEvent(type="message", content=narrative))
 
-        self.current_turn_index = self.current_turn_index % len(self.players)
+        # СМЕНА РАУНДОВ И ЛОГИКА НАРРАТОРА
+        if self.current_turn_index >= len(self.players):
+            self.current_turn_index = 0
+            self.state.shared_data["current_round"] += 1
+
+            cur_round = self.state.shared_data["current_round"]
+            max_round = self.state.shared_data["max_rounds"]
+
+            if cur_round > max_round:
+                return await self._start_voting()
+
+            events.append(GameEvent(type="message", content=f"🔔 <b>Раунд {cur_round}/{max_round}</b>"))
+
+            # Нарратор с параметрами раундов
+            if len(self.state.history) > 3:
+                scen_title = self.state.shared_data["scenario"]["title"]
+                narrative = await self.narrator_agent.narrate(
+                    scen_title,
+                    self.state.history,
+                    cur_round,
+                    max_round
+                )
+                if narrative:
+                    events.append(GameEvent(type="message", content=narrative))
+
         current_player = self.players[self.current_turn_index]
-
         char_name = current_player.attributes["detective_profile"].character_name
 
+        # ХОД БОТА
         if not current_player.is_human:
             t_count = self.state.shared_data["turn_count"]
             msg_token = f"turn_{t_count}_{current_player.id}"
@@ -115,8 +139,10 @@ class DetectiveGame(GameEngine):
             events.append(GameEvent(type="message", content=f"⏳ <b>{char_name}</b> пишет...", token=msg_token))
             events.append(GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id}))
             return events
+
+        # ХОД ЧЕЛОВЕКА
         else:
-            msg = "👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат, чтобы завершить ход."
+            msg = "👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат."
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
 
             await self._refresh_suggestions(current_player, silent=True)
@@ -141,8 +167,16 @@ class DetectiveGame(GameEngine):
         pub_ids = self.state.shared_data["public_facts"]
         pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
 
+        # ПЕРЕДАЧА ПАРАМЕТРОВ РАУНДА В БОТА
         decision = await self.bot_agent.make_turn(
-            bot, self.players, scen_data, self.state.history, pub_facts, all_facts_objs
+            bot,
+            self.players,
+            scen_data,
+            self.state.history,
+            pub_facts,
+            all_facts_objs,
+            self.state.shared_data["current_round"],
+            self.state.shared_data["max_rounds"]
         )
 
         speech = decision.get("speech", "...")
@@ -166,12 +200,6 @@ class DetectiveGame(GameEngine):
     async def process_message(self, player_id: int, text: str) -> List[GameEvent]:
         p = next((x for x in self.players if x.id == player_id), None)
         if not p: return []
-
-        if text.strip() == "/finish":
-            if self.state.phase == GamePhase.INVESTIGATION:
-                return await self._start_voting()
-            else:
-                return [GameEvent(type="message", target_ids=[player_id], content="Голосование уже идет!")]
 
         active_player = self.players[self.current_turn_index % len(self.players)]
         active_char = active_player.attributes["detective_profile"].character_name
@@ -285,7 +313,8 @@ class DetectiveGame(GameEngine):
     async def _start_voting(self) -> List[GameEvent]:
         self.state.phase = GamePhase.FINAL_VOTE
         self.votes = {}
-        events = [GameEvent(type="message", content="🛑 <b>СТОП ИГРА! ПРИШЛО ВРЕМЯ ОБВИНЕНИЙ.</b>\nКто убийца?")]
+        events = [GameEvent(type="message",
+                            content="🛑 <b>ВРЕМЯ ИСТЕКЛО! ПОЛИЦИЯ УЖЕ ЗДЕСЬ.</b>\nПришло время указать на убийцу.")]
         candidates = [p for p in self.players]
         for p in self.players:
             if p.is_human:
@@ -293,8 +322,9 @@ class DetectiveGame(GameEngine):
                 for cand in candidates:
                     char_name = cand.attributes["detective_profile"].character_name
                     kb.append({"text": char_name, "callback_data": f"vote_{cand.name}"})
-                events.append(GameEvent(type="message", target_ids=[p.id], content="👉 <b>Выберите виновного:</b>",
-                                        reply_markup=kb))
+                events.append(
+                    GameEvent(type="message", target_ids=[p.id], content="👉 <b>Кто совершил преступление?</b>",
+                              reply_markup=kb))
         events.append(GameEvent(type="switch_turn"))
         return events
 
@@ -375,8 +405,6 @@ class DetectiveGame(GameEngine):
                               extra_data={"is_dashboard": True})]
         else:
             return [GameEvent(type="edit_message", target_ids=[player.id], content=text, reply_markup=kb, token=token)]
-
-    # --- ABSTRACT METHODS IMPLEMENTATION ---
 
     def get_player_view(self, viewer_id: int) -> str:
         return "Detective View"

@@ -5,10 +5,10 @@ from pydantic import BaseModel, Field
 # --- ENUMS ---
 
 class FactType(str, Enum):
-    PHYSICAL = "PHYSICAL"     # Улика
-    TESTIMONY = "TESTIMONY"   # Показания
-    MOTIVE = "MOTIVE"         # Мотив
-    ALIBI = "ALIBI"           # Алиби
+    PHYSICAL = "PHYSICAL"
+    TESTIMONY = "TESTIMONY"
+    MOTIVE = "MOTIVE"
+    ALIBI = "ALIBI"
 
 class RoleType(str, Enum):
     KILLER = "KILLER"
@@ -37,8 +37,8 @@ class SuggestionData(BaseModel):
 
 class DetectivePlayerProfile(BaseModel):
     character_name: str = "Неизвестный"
-    archetype: str = "Обыватель"          # Характер
-    relationships: str = "Нет связей"     # Связи
+    archetype: str = "Обыватель"
+    relationships: str = "Нет связей"
     role: RoleType = RoleType.INNOCENT
     bio: str = ""
     secret_objective: str = ""
@@ -57,4 +57,6 @@ class DetectiveScenario(BaseModel):
 class DetectiveStateData(BaseModel):
     scenario: DetectiveScenario
     public_facts: List[str] = Field(default_factory=list)
-    turn_count: int = 0
+    turn_count: int = 0       # Общее кол-во ходов
+    current_round: int = 1    # Текущий круг (1, 2, 3)
+    max_rounds: int = 3       # Лимит кругов

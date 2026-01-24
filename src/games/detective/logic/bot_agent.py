@@ -34,16 +34,16 @@ class DetectiveBotAgent:
 
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
-        # ВАЖНО: Заполняем новые поля промпта
+        # ИСПРАВЛЕНО: Добавлен аргумент tag
         prompt = prompt_template.format(
             name=bot.name,
+            tag=prof.tag,
             character_name=prof.character_name,
             archetype=prof.archetype,
-            legend=prof.legend,  # <--- Легенда вместо bio/relationships
+            legend=prof.legend,
             objective=prof.secret_objective,
 
             scenario_title=scenario_data.get("title", ""),
-            # Передаем детали убийства
             victim=scenario_data.get("victim_name", "Неизвестный"),
             cause=scenario_data.get("cause_of_death", "Неизвестно"),
 

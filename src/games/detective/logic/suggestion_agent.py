@@ -9,7 +9,7 @@ from src.games.detective.config import detective_cfg
 class SuggestionAgent:
     async def generate(self,
                        player: BasePlayer,
-                       scenario_data: dict,  # НОВОЕ: Передаем данные сценария
+                       scenario_data: dict,
                        history: List[str],
                        public_facts: List[Fact],
                        all_facts_map: dict,
@@ -28,8 +28,10 @@ class SuggestionAgent:
 
         prompt_template = detective_cfg.prompts["suggestion"]["system"]
 
+        # ИСПРАВЛЕНО: Добавлен аргумент tag
         prompt = prompt_template.format(
             character_name=prof.character_name,
+            tag=prof.tag,
             legend=prof.legend,
 
             victim=scenario_data.get("victim_name", "Неизвестный"),

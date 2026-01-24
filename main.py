@@ -127,9 +127,6 @@ async def broadcast_lobby_ui(lobby: Lobby):
 async def process_game_events(context_id: str, events: list[GameEvent]):
     if not events: return
     game = active_games.get(context_id)
-    # Если игры уже нет (удалена после game_over), но события есть - пытаемся отправить их
-    # Но для этого нужны ID игроков. Если game is None, сложно.
-    # В текущей логике game удаляется ПОСЛЕ обработки game_over в этом методе.
     if not game: return
 
     should_delete_game = False
@@ -219,7 +216,8 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                 if hasattr(game, "logger") and game.logger:
                     local_path = game.logger.get_session_path()
                     s3_path = game.logger.get_s3_target_path()
-                    asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path))
+                    # Финальная выгрузка с удалением
+                    asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path, True))
 
             elif event.type == "switch_turn":
                 await asyncio.sleep(0.5)
@@ -233,7 +231,6 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
         except Exception as e:
             logging.error(f"Event Error ({event.type}): {e}")
 
-    # Удаляем игру только после обработки всех событий
     if should_delete_game:
         if game.lobby_id in active_games: del active_games[game.lobby_id]
         if game.lobby_id in dashboard_map: del dashboard_map[game.lobby_id]
@@ -241,6 +238,38 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
 
 # === COMMANDS ===
+
+@router.message(Command("send_logs"))
+async def cmd_send_logs(message: Message):
+    """Принудительная отправка логов текущей игры админом"""
+    user_id = message.from_user.id
+    if not ADMIN_ID or user_id != ADMIN_ID: return
+
+    # Пытаемся найти игру, где админ - игрок или хост
+    lid = lobby_manager.user_to_lobby.get(user_id)
+    if not lid and str(user_id) in active_games:
+        lid = str(user_id)
+
+    if not lid or lid not in active_games:
+        await message.reply("⚠️ Нет активной игры для отправки логов.")
+        return
+
+    game = active_games[lid]
+    if not hasattr(game, "logger") or not game.logger:
+        await message.reply("⚠️ У этой игры нет логгера.")
+        return
+
+    # Выгружаем без удаления
+    local_path = game.logger.get_session_path()
+    s3_path = game.logger.get_s3_target_path()
+
+    await message.reply("⏳ Выгрузка логов...")
+
+    # Запускаем в отдельном потоке, чтобы не блокировать бота
+    await asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path, delete_after=False)
+
+    await message.reply(f"✅ Логи выгружены!\nS3: <code>{s3_path}</code>")
+
 
 @router.message(Command("fake_join"))
 async def cmd_fake_join(message: Message, command: CommandObject):
@@ -394,7 +423,6 @@ async def start_solo_handler(callback: CallbackQuery):
 
     events = await game.init_game([{"id": user.id, "name": user.first_name}])
 
-    # ПРОВЕРКА НА ОШИБКУ ИНИЦИАЛИЗАЦИИ (Crash Fix)
     is_failed = False
     for e in events:
         if e.type == "game_over":
@@ -402,7 +430,6 @@ async def start_solo_handler(callback: CallbackQuery):
 
     await process_game_events(lid, events)
 
-    # Если игра не стартанула, не запускаем цикл
     if not is_failed:
         for e in events:
             if e.type == "update_dashboard":
@@ -514,7 +541,6 @@ async def lobby_start_handler(callback: CallbackQuery):
 
     events = await game.init_game(users_data)
 
-    # ПРОВЕРКА НА ОШИБКУ (Crash Fix)
     is_failed = False
     for e in events:
         if e.type == "game_over":

@@ -1,6 +1,5 @@
 import boto3
 import os
-import logging
 import shutil
 from botocore.exceptions import NoCredentialsError, ClientError
 
@@ -27,16 +26,14 @@ class S3Uploader:
         else:
             print("⚠️ S3 Env variables missing. Uploading disabled.")
 
-    def upload_session_folder(self, local_folder_path: str, target_s3_path: str):
+    def upload_session_folder(self, local_folder_path: str, target_s3_path: str, delete_after: bool = True):
         """
-        Загружает содержимое локальной папки в S3 по указанному пути.
-        local_folder_path: ./Logs/Session_123
-        target_s3_path: Alexey/2023-10-10_12-00
+        Загружает содержимое локальной папки в S3.
+        delete_after: Если False, папка не удаляется (для промежуточных логов).
         """
         if not self.s3_client:
             print("⚠️ S3 Client not ready. Skipping upload.")
-            # Удаляем локально, чтобы не засорять диск
-            if os.path.exists(local_folder_path):
+            if delete_after and os.path.exists(local_folder_path):
                 try:
                     shutil.rmtree(local_folder_path)
                 except:
@@ -47,7 +44,7 @@ class S3Uploader:
             print(f"⚠️ Local log folder not found: {local_folder_path}")
             return
 
-        print(f"☁️ Uploading logs to S3: {target_s3_path}...")
+        print(f"☁️ Uploading logs to S3: {target_s3_path} (Delete: {delete_after})...")
 
         uploaded_count = 0
         try:
@@ -55,8 +52,13 @@ class S3Uploader:
                 for filename in files:
                     local_file = os.path.join(root, filename)
 
-                    # Формируем путь в S3: User/Date/Filename
-                    s3_key = f"{target_s3_path}/{filename}"
+                    # Формируем путь в S3
+                    # Если в папке есть подпапки, сохраняем структуру относительно local_folder_path
+                    rel_path = os.path.relpath(local_file, local_folder_path)
+                    # Заменяем обратные слеши на прямые для S3
+                    rel_path = rel_path.replace("\\", "/")
+
+                    s3_key = f"{target_s3_path}/{rel_path}"
 
                     try:
                         self.s3_client.upload_file(local_file, self.bucket_name, s3_key)
@@ -69,11 +71,13 @@ class S3Uploader:
         except Exception as e:
             print(f"🔥 S3 Global Error: {e}")
 
-        # Удаляем локальную папку
-        try:
-            shutil.rmtree(local_folder_path)
-        except Exception as e:
-            print(f"⚠️ Error cleaning up local logs: {e}")
+        # Удаляем локальную папку только если запрошено
+        if delete_after:
+            try:
+                shutil.rmtree(local_folder_path)
+                print(f"🗑️ Local logs deleted: {local_folder_path}")
+            except Exception as e:
+                print(f"⚠️ Error cleaning up local logs: {e}")
 
 
 # Глобальный инстанс

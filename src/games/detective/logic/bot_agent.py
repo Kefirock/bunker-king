@@ -30,20 +30,23 @@ class DetectiveBotAgent:
             if fact and not fact.is_public:
                 inv_lines.append(f"ID: {fid} | [{fact.type}] {fact.text}")
 
-        inv_str = "\n".join(inv_lines) if inv_lines else "Пусто (или все вскрыто)"
+        inv_str = "\n".join(inv_lines) if inv_lines else "Пусто"
 
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
+        # ВАЖНО: Заполняем новые поля промпта
         prompt = prompt_template.format(
             name=bot.name,
             character_name=prof.character_name,
             archetype=prof.archetype,
-            relationships=prof.relationships,
-            role=prof.role,
-            bio=prof.bio,
+            legend=prof.legend,  # <--- Легенда вместо bio/relationships
             objective=prof.secret_objective,
+
             scenario_title=scenario_data.get("title", ""),
-            scenario_desc=scenario_data.get("description", ""),
+            # Передаем детали убийства
+            victim=scenario_data.get("victim_name", "Неизвестный"),
+            cause=scenario_data.get("cause_of_death", "Неизвестно"),
+
             public_facts=pub_str,
             inventory=inv_str,
             history="\n".join(history[-10:]),
@@ -63,19 +66,17 @@ class DetectiveBotAgent:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temp,
                 json_mode=True,
-                logger=logger  # <-- Передаем логгер в LLMClient для записи сырого запроса
+                logger=logger
             )
-
             data = llm_client.parse_json(response)
 
-            # Логируем решение бота (его мысли)
             if logger:
                 logger.log_event("BOT_DECISION", f"{bot.name} ({prof.character_name}) acted", data)
 
             return data
         except Exception as e:
             print(f"Bot Error {bot.name}: {e}")
-            if logger: logger.log_event("BOT_ERROR", f"Error in make_turn for {bot.name}: {e}")
+            if logger: logger.log_event("BOT_ERROR", f"Error: {e}")
             return {"speech": "...", "reveal_fact_id": None}
 
     async def make_vote(self,
@@ -104,12 +105,11 @@ class DetectiveBotAgent:
         prompt_template = detective_cfg.prompts["bot_player"]["vote"]
 
         prompt = prompt_template.format(
-            name=bot.name,
             character_name=prof.character_name,
-            archetype=prof.archetype,
-            relationships=prof.relationships,
-            role=prof.role,
             scenario_title=scenario_data.get("title", ""),
+
+            victim=scenario_data.get("victim_name", "Неизвестный"),
+
             public_facts=pub_str,
             history="\n".join(history[-15:]),
             candidates=cand_str

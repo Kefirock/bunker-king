@@ -19,7 +19,6 @@ from src.games.detective.config import detective_cfg
 class DetectiveGame(GameEngine):
     def __init__(self, lobby_id: str, host_name: str):
         super().__init__(lobby_id, host_name)
-        # Логгер инициализируется с именем игры, чтобы создать папку Logs/Detective/...
         self.logger = SessionLogger("Detective", lobby_id, host_name)
 
         self.scenario_gen = ScenarioGenerator()
@@ -31,14 +30,13 @@ class DetectiveGame(GameEngine):
         self.votes = {}
 
     async def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
-        self.logger.log_event("INIT_START", f"Initializing game for {len(users_data)} users", {"users": users_data})
+        self.logger.log_event("INIT_START", f"Init for {len(users_data)} users")
         names = [u["name"] for u in users_data]
 
         try:
-            # Передаем logger в генератор
             scenario, profiles_map = await self.scenario_gen.generate(names, logger=self.logger)
         except ScenarioGenerationError as e:
-            self.logger.log_event("INIT_ERROR", f"Scenario generation failed: {e}")
+            self.logger.log_event("INIT_ERROR", f"Scenario failed: {e}")
             error_msg = f"❌ <b>ОШИБКА ЗАПУСКА</b>\n\nНейросеть не смогла сгенерировать стабильный сценарий.\nПричина: <i>{str(e)}</i>"
             return [GameEvent(type="game_over", content=error_msg)]
 
@@ -56,27 +54,24 @@ class DetectiveGame(GameEngine):
             bot_names = DetectiveUtils.get_bot_names(needed)
             for i, b_name in enumerate(bot_names):
                 self.players.append(BasePlayer(id=-100 - i, name=b_name, is_human=False))
-            self.logger.log_event("AUTO_FILL", f"Added {needed} bots", {"bot_names": bot_names})
+            self.logger.log_event("AUTO_FILL", f"Added {needed} bots")
 
         import random
         random.shuffle(self.players)
 
-        # Перегенерация для полного состава
         full_names = [p.name for p in self.players]
         try:
-            # Передаем logger
             scenario, profiles_map = await self.scenario_gen.generate(full_names, logger=self.logger)
         except ScenarioGenerationError as e:
-            self.logger.log_event("INIT_ERROR", f"Full scenario generation failed: {e}")
+            self.logger.log_event("INIT_ERROR", f"Full gen failed: {e}")
             return [GameEvent(type="game_over", content="Ошибка генерации ролей для ботов.")]
 
         for p in self.players:
             p.attributes["detective_profile"] = profiles_map.get(p.name, DetectivePlayerProfile())
 
-        # Логируем распределение ролей (СПОЙЛЕРЫ В ЛОГАХ)
         roles_log = {p.name: p.attributes["detective_profile"].dict(include={'character_name', 'role'}) for p in
                      self.players}
-        self.logger.log_event("ROLES_ASSIGNED", "Roles distributed", roles_log)
+        self.logger.log_event("ROLES", "Roles assigned", roles_log)
 
         max_rounds = detective_cfg.gameplay.get("setup", {}).get("max_rounds", 3)
 
@@ -95,14 +90,24 @@ class DetectiveGame(GameEngine):
         )
 
         events = []
+
+        # ПОЛИЦЕЙСКИЙ ПРОТОКОЛ (НОВОЕ)
+        protocol = (
+            f"📄 <b>ПОЛИЦЕЙСКИЙ ПРОТОКОЛ</b>\n\n"
+            f"👤 <b>Жертва:</b> {scenario.victim_name}\n"
+            f"🕒 <b>Время:</b> {scenario.time_of_death}\n"
+            f"📍 <b>Место:</b> {scenario.location_of_body}\n"
+            f"💀 <b>Причина смерти:</b> {scenario.cause_of_death}\n"
+        )
+        events.append(GameEvent(type="message", content=protocol))
+
         events.append(GameEvent(type="message", content=f"🕵️‍♂️ <b>ДЕЛО: {scenario.title}</b>\n{scenario.description}"))
 
         char_names = [p.attributes["detective_profile"].character_name for p in self.players]
-        events.append(GameEvent(type="message", content=f"👥 <b>В ролях:</b>\n" + ", ".join(char_names)))
-        events.append(GameEvent(type="message",
-                                content=f"💡 <i>Игра началась. У вас есть <b>{max_rounds} круга</b> обсуждения.</i>"))
+        events.append(GameEvent(type="message", content=f"👥 <b>Подозреваемые:</b>\n" + ", ".join(char_names)))
+        events.append(
+            GameEvent(type="message", content=f"💡 <i>Игра началась. У вас есть <b>{max_rounds} круга</b>.</i>"))
 
-        self.logger.log_event("GAME_STARTED", "Initialization complete")
         return events
 
     # --- GAME LOOP ---
@@ -122,7 +127,7 @@ class DetectiveGame(GameEngine):
             cur_round = self.state.shared_data["current_round"]
             max_round = self.state.shared_data["max_rounds"]
 
-            self.logger.log_event("ROUND_CHANGE", f"Starting Round {cur_round}/{max_round}")
+            self.logger.log_event("ROUND", f"Round {cur_round}/{max_round}")
 
             if cur_round > max_round:
                 return await self._start_voting()
@@ -130,10 +135,9 @@ class DetectiveGame(GameEngine):
             events.append(GameEvent(type="message", content=f"🔔 <b>Раунд {cur_round}/{max_round}</b>"))
 
             if len(self.state.history) > 3:
-                scen_title = self.state.shared_data["scenario"]["title"]
-                # Передаем logger
+                scen_data = self.state.shared_data["scenario"]  # Это dict
                 narrative = await self.narrator_agent.narrate(
-                    scen_title,
+                    scen_data,
                     self.state.history,
                     cur_round,
                     max_round,
@@ -144,9 +148,6 @@ class DetectiveGame(GameEngine):
 
         current_player = self.players[self.current_turn_index]
         char_name = current_player.attributes["detective_profile"].character_name
-
-        # Логируем чей ход
-        self.logger.log_event("TURN", f"Current turn: {current_player.name} ({char_name})")
 
         if not current_player.is_human:
             t_count = self.state.shared_data["turn_count"]
@@ -183,7 +184,6 @@ class DetectiveGame(GameEngine):
         pub_ids = self.state.shared_data["public_facts"]
         pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
 
-        # Передаем logger
         decision = await self.bot_agent.make_turn(
             bot,
             self.players,
@@ -201,7 +201,7 @@ class DetectiveGame(GameEngine):
 
         events = []
         if fact_to_reveal:
-            self.logger.log_event("BOT_ACTION", f"{bot.name} decided to reveal fact {fact_to_reveal}")
+            self.logger.log_event("BOT_ACTION", f"{bot.name} revealed fact {fact_to_reveal}")
             reveal_events = await self._reveal_fact(bot, fact_to_reveal)
             events.extend(reveal_events)
 
@@ -229,7 +229,6 @@ class DetectiveGame(GameEngine):
                 content=f"⚠️ <b>Не ваш ход!</b> Сейчас говорит {active_char}."
             )]
 
-        # Логируем сообщение
         self.logger.log_event("CHAT", f"{p.name} ({active_char}): {text}")
 
         my_char = p.attributes["detective_profile"].character_name
@@ -247,8 +246,7 @@ class DetectiveGame(GameEngine):
         p = next((x for x in self.players if x.id == player_id), None)
         if not p: return []
 
-        # Логируем действие
-        self.logger.log_event("PLAYER_ACTION", f"{p.name} clicked {action_data}")
+        self.logger.log_event("ACTION", f"{p.name} -> {action_data}")
 
         active_player = self.players[self.current_turn_index % len(self.players)]
         is_my_turn = (p.id == active_player.id)
@@ -300,8 +298,7 @@ class DetectiveGame(GameEngine):
         if fact["is_public"]:
             return [GameEvent(type="callback_answer", target_ids=[player.id], content="Уже вскрыто!")]
 
-        # Логируем вскрытие
-        self.logger.log_event("FACT_REVEALED", f"{player.name} revealed fact {fact_id}", {"text": fact["text"]})
+        self.logger.log_event("FACT_REVEAL", f"{player.name} revealed {fact['text']}")
 
         fact["is_public"] = True
         self.state.shared_data["public_facts"].append(fact_id)
@@ -330,15 +327,19 @@ class DetectiveGame(GameEngine):
         pub_ids = self.state.shared_data["public_facts"]
         pub_facts = [all_facts_objs[fid] for fid in pub_ids if fid in all_facts_objs]
 
-        # Передаем logger (если нужно логировать промпты подсказок, раскомментируйте в suggestion_agent)
         sugg = await self.suggestion_agent.generate(
-            player, self.state.history, pub_facts, all_facts_objs, logger=self.logger
+            player,
+            scen_data,  # Передаем сценарий
+            self.state.history,
+            pub_facts,
+            all_facts_objs,
+            logger=self.logger
         )
         player.attributes["detective_profile"].last_suggestions = sugg
         return []
 
     async def _start_voting(self) -> List[GameEvent]:
-        self.logger.log_event("PHASE_CHANGE", "Starting FINAL_VOTE")
+        self.logger.log_event("PHASE", "FINAL_VOTE STARTED")
         self.state.phase = GamePhase.FINAL_VOTE
         self.votes = {}
         events = [GameEvent(type="message",
@@ -366,7 +367,6 @@ class DetectiveGame(GameEngine):
 
         for p in self.players:
             if not p.is_human and p.name not in self.votes:
-                # Передаем logger
                 vote_target = await self.bot_agent.make_vote(
                     p, self.players, scen_data, self.state.history, pub_facts, logger=self.logger
                 )
@@ -380,7 +380,7 @@ class DetectiveGame(GameEngine):
         if player.name in self.votes:
             return [GameEvent(type="callback_answer", target_ids=[player.id], content="Голос уже принят")]
 
-        self.logger.log_event("VOTE_CAST", f"{player.name} voted for {target_name}")
+        self.logger.log_event("VOTE", f"{player.name} -> {target_name}")
         self.votes[player.name] = target_name
 
         target_p = next((p for p in self.players if p.name == target_name), None)
@@ -409,8 +409,6 @@ class DetectiveGame(GameEngine):
 
         winner_p = next((p for p in self.players if p.name == winner_name), None)
         winner_char = winner_p.attributes["detective_profile"].character_name if winner_p else winner_name
-
-        self.logger.log_event("RESULT", f"Accused: {winner_name}, Real: {real_killer.name if real_killer else 'None'}")
 
         report = f"📊 <b>ИТОГИ ГОЛОСОВАНИЯ:</b>\n"
         for name, cnt in counts.items():

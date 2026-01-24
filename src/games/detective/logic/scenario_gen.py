@@ -1,7 +1,6 @@
 import uuid
 import random
-import json
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict
 from src.core.llm import llm_client
 from src.core.config import core_cfg
 from src.games.detective.config import detective_cfg
@@ -18,26 +17,20 @@ class ScenarioGenerator:
         count = len(player_names)
 
         system_prompt = detective_cfg.prompts["scenario_writer"]["system"].format(
-            player_count=count,
-            total_facts=count * 5
+            player_count=count
         )
 
         model = core_cfg.models["player_models"][0]
         max_attempts = 3
 
         if logger:
-            logger.log_event("SCENARIO_GEN", f"Starting generation for {count} players: {player_names}")
+            logger.log_event("SCENARIO_GEN", f"Starting generation for {count} players")
 
         for attempt in range(1, max_attempts + 1):
             print(f"🧠 Детектив: Попытка генерации ({attempt}/{max_attempts})...")
 
             try:
                 current_temp = 0.7 + (attempt * 0.1)
-
-                # Логируем попытку (без огромного промпта, только факт)
-                if logger:
-                    logger.log_event("SCENARIO_ATTEMPT", f"Attempt {attempt}/{max_attempts}, Temp: {current_temp}")
-
                 response = await llm_client.generate(
                     model_config=model,
                     messages=[{"role": "system", "content": system_prompt}],
@@ -48,22 +41,18 @@ class ScenarioGenerator:
                 data = llm_client.parse_json(response)
 
                 # Валидация
-                if not data or "roles" not in data:
-                    print(f"⚠️ Попытка {attempt}: Нет поля roles.")
-                    if logger: logger.log_event("GEN_ERROR", f"Missing 'roles' field in JSON",
-                                                {"response_snippet": response[:200]})
+                required_fields = ["roles", "victim", "solution"]
+                if not data or any(f not in data for f in required_fields):
+                    print(f"⚠️ Попытка {attempt}: Отсутствуют обязательные поля.")
                     continue
 
                 roles_data = data.get("roles", [])
-                generated_names = [r.get("player_name") for r in
-                                   roles_data]  # Может отсутствовать в новой схеме, это ок
+                if len(roles_data) < count:
+                    print(f"⚠️ Попытка {attempt}: Мало ролей.")
+                    continue
 
-                # Успех
                 if logger:
-                    logger.log_event("SCENARIO_SUCCESS", "Scenario generated successfully",
-                                     {"title": data.get("title")})
-                    # Логируем полный JSON сценария для отладки баланса
-                    logger.log_event("SCENARIO_DUMP", "Full JSON", data)
+                    logger.log_event("SCENARIO_SUCCESS", "Generated", {"title": data.get("title")})
 
                 return self._parse_scenario(data, player_names)
 
@@ -72,16 +61,20 @@ class ScenarioGenerator:
                 if logger: logger.log_event("GEN_EXCEPTION", str(e))
                 continue
 
-        error_msg = "Не удалось сгенерировать сценарий."
-        if logger: logger.log_event("SCENARIO_FAIL", error_msg)
-        raise ScenarioGenerationError(error_msg)
+        raise ScenarioGenerationError("Не удалось сгенерировать сценарий.")
 
     def _parse_scenario(self, data: Dict, player_names: List[str]) -> Tuple[
         DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
         scenario = DetectiveScenario(
-            title=data.get("title", "Unknown Case"),
-            description=data.get("description", "..."),
-            victim_name=data.get("victim", "Unknown"),
+            title=data.get("title", "Дело без названия"),
+            description=data.get("description", "Загадочное происшествие..."),
+
+            # Новые поля протокола
+            victim_name=data.get("victim", "Неизвестный"),
+            time_of_death=data.get("time_of_death", "Неизвестно"),
+            cause_of_death=data.get("cause_of_death", "Неизвестно"),
+            location_of_body=data.get("location_of_body", "Неизвестно"),
+
             murder_method=data.get("method", "Unknown"),
             true_solution=data.get("solution", "Unknown")
         )
@@ -98,15 +91,16 @@ class ScenarioGenerator:
             r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
+            # Формируем профиль с новой легендой
             profile = DetectivePlayerProfile(
                 character_name=char_name,
                 archetype=role_json.get("archetype", "Обыватель"),
-                relationships=role_json.get("relationships", "Нет связей"),
+                legend=role_json.get("legend", role_json.get("bio", "Нет данных")),  # <--- НОВОЕ
                 role=role_enum,
-                bio=role_json.get("bio", ""),
                 secret_objective=role_json.get("secret", "")
             )
 
+            # Парсинг фактов
             raw_facts = role_json.get("facts", [])
             while len(raw_facts) < 5 and raw_facts:
                 raw_facts.append(raw_facts[-1].copy())

@@ -1,3 +1,4 @@
+import random
 from typing import List, Dict
 from src.core.schemas import BasePlayer
 from src.games.detective.schemas import Fact, DetectivePlayerProfile, FactType, RoleType
@@ -31,7 +32,6 @@ BOT_NAMES_POOL = [
 class DetectiveUtils:
     @staticmethod
     def get_bot_names(count: int) -> List[str]:
-        import random
         return random.sample(BOT_NAMES_POOL, min(count, len(BOT_NAMES_POOL)))
 
     @staticmethod
@@ -53,28 +53,21 @@ class DetectiveUtils:
 
         role_str = ROLE_MAP.get(prof.role, str(prof.role))
 
-        # БЛОК 1: Основное Досье
+        # Обновленный формат досье
         text = (
             f"🎭 <b>ВАШ ПЕРСОНАЖ:</b> {prof.character_name}\n"
-            f"🧠 <b>Характер:</b> {prof.archetype}\n"
             f"🏷 <b>Статус:</b> {role_str}\n"
-            f"🎯 <b>Цель:</b> {prof.secret_objective}\n"
-            f"📜 <b>Легенда:</b> <i>{prof.bio}</i>\n\n"
+            f"🎯 <b>Цель:</b> {prof.secret_objective}\n\n"
+            f"📜 <b>ЛЕГЕНДА:</b>\n<i>{prof.legend}</i>\n\n"
         )
 
-        # БЛОК 2: Связи (НОВОЕ)
-        if prof.relationships and prof.relationships != "Нет связей":
-            text += f"🔗 <b>СВЯЗИ:</b>\n<i>{prof.relationships}</i>\n\n"
-
-        # БЛОК 3: Статус участия
         done = prof.published_facts_count
         status = "✅ Выполнено" if done >= 2 else f"⚠️ Осталось вскрыть: <b>{2 - done}</b>"
         text += f"📊 <b>Вклад:</b> {status}\n\n"
 
-        # БЛОК 4: Подсказки (Краткие)
         sugg = prof.last_suggestions
         if sugg:
-            text += "💡 <b>СОВЕТЫ (Нажми, чтобы скопировать):</b>\n"
+            text += "💡 <b>СОВЕТЫ:</b>\n"
             if sugg.logic_text: text += f"🔹 <code>{sugg.logic_text}</code>\n"
             if sugg.defense_text: text += f"🛡 <code>{sugg.defense_text}</code>\n"
             if sugg.bluff_text: text += f"🎭 <code>{sugg.bluff_text}</code>\n"

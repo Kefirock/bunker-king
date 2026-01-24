@@ -11,7 +11,8 @@ class SuggestionAgent:
                        player: BasePlayer,
                        history: List[str],
                        public_facts: List[Fact],
-                       all_facts_map: dict) -> SuggestionData:
+                       all_facts_map: dict,
+                       logger=None) -> SuggestionData:
 
         prof = player.attributes.get("detective_profile")
         if not prof: return SuggestionData(logic_text="...", defense_text="...", bluff_text="...")
@@ -41,13 +42,21 @@ class SuggestionAgent:
         model = core_cfg.models["player_models"][0]
 
         try:
+            # Логгируем подсказки только если что-то пошло не так (опционально),
+            # или можно логировать всегда для анализа качества
             response = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.6,
                 json_mode=True
+                # Не передаем logger в generate, чтобы не засорять логи тысячами токенов подсказок
+                # (Если хотите видеть промпты подсказок, раскомментируйте: logger=logger)
             )
             data = llm_client.parse_json(response)
+
+            # Если передали логгер, можно записать краткий итог
+            # if logger: logger.log_event("SUGGESTIONS", f"Generated for {player.name}")
+
             return SuggestionData(
                 logic_text=data.get("logic_text", ""),
                 defense_text=data.get("defense_text", ""),
@@ -55,4 +64,5 @@ class SuggestionAgent:
             )
         except Exception as e:
             print(f"Suggestion Error: {e}")
+            if logger: logger.log_event("SUGGESTION_ERROR", str(e))
             return SuggestionData(logic_text="Ошибка AI", defense_text="...", bluff_text="...")

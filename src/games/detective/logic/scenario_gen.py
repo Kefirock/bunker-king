@@ -40,12 +40,13 @@ class ScenarioGenerator:
                 data = llm_client.parse_json(response)
 
                 # Валидация
-                if not data or "roles" not in data or len(data["roles"]) < count:
+                required_fields = ["roles", "victim", "solution"]
+                if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
                     print("⚠️ Шаг 1: Ошибка структуры.")
                     continue
 
                 scenario_data = data
-                break  # Успех
+                break
             except Exception as e:
                 print(f"⚠️ Шаг 1 Ошибка: {e}")
                 continue
@@ -55,11 +56,15 @@ class ScenarioGenerator:
 
         # --- ШАГ 2: ГЕНЕРАЦИЯ УЛИК (ДЕТАЛИЗАЦИЯ) ---
 
-        # Подготовка контекста для шага 2
+        # Передаем больше контекста для генератора фактов
         roles_desc = []
         for r in scenario_data["roles"]:
             roles_desc.append(
-                f"- {r.get('character_name')} ({r.get('tag')}): {r.get('role')}, Легенда: {r.get('legend')[:100]}...")
+                f"- Имя: {r.get('character_name')} ({r.get('tag')})\n"
+                f"  Роль: {r.get('role')}\n"
+                f"  Легенда: {r.get('legend')}\n"
+                f"  Секрет: {r.get('secret')}"
+            )
 
         facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
             victim=scenario_data.get("victim"),
@@ -73,25 +78,22 @@ class ScenarioGenerator:
 
         if logger: logger.log_event("GEN_STEP_2", "Generating Facts")
 
-        # Одна попытка генерации фактов (если упадет, сделаем фоллбек)
         try:
-            print(f"🧠 Шаг 2: Улики...")
+            print(f"🧠 Шаг 2: Улики (Фактура)...")
             response_facts = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "system", "content": facts_prompt}],
-                temperature=0.7,
+                temperature=0.85,  # Высокая температура для креатива в деталях
                 json_mode=True
             )
             parsed_facts = llm_client.parse_json(response_facts)
 
-            # Превращаем в мапу {char_name: [facts]}
             for item in parsed_facts.get("facts_by_character", []):
                 facts_data_map[item.get("character_name")] = item.get("facts", [])
 
         except Exception as e:
             print(f"⚠️ Ошибка генерации фактов: {e}")
             if logger: logger.log_event("GEN_FACTS_ERROR", str(e))
-            # Не крашимся, просто будут пустые факты (или можно сгенерить заглушки)
 
         # --- СБОРКА РЕЗУЛЬТАТА ---
         return self._assemble_game_objects(scenario_data, facts_data_map, player_names)
@@ -102,7 +104,7 @@ class ScenarioGenerator:
                                player_names: List[str]) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
 
         scenario = DetectiveScenario(
-            title=scen_data.get("title", "Дело №0"),
+            title=scen_data.get("title", "Дело без названия"),
             description=scen_data.get("description", "..."),
             victim_name=scen_data.get("victim", "Неизвестный"),
             time_of_death=scen_data.get("time_of_death", "Неизвестно"),
@@ -115,33 +117,31 @@ class ScenarioGenerator:
         player_profiles: Dict[str, DetectivePlayerProfile] = {}
         roles_data = scen_data.get("roles", [])
 
-        # Перемешивание ролей
         random.shuffle(roles_data)
 
         for i, real_name in enumerate(player_names):
-            # Безопасный индекс
             role_json = roles_data[i] if i < len(roles_data) else roles_data[0]
 
             char_name = role_json.get("character_name", f"Персонаж {i + 1}")
-
             r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
             profile = DetectivePlayerProfile(
                 character_name=char_name,
-                tag=role_json.get("tag", "Гость"),  # <--- НОВОЕ
+                tag=role_json.get("tag", "Гость"),
                 legend=role_json.get("legend", ""),
                 role=role_enum,
                 secret_objective=role_json.get("secret", "")
             )
 
-            # Достаем факты для этого персонажа из мапы (по имени персонажа)
+            # Достаем факты по имени персонажа
+            # (Иногда LLM чуть меняет имя, поэтому можно добавить fuzzy match, но пока строго)
             raw_facts = facts_map.get(char_name, [])
 
-            # Если фактов нет или мало, генерируем заглушки (fallback)
+            # Fallback
             while len(raw_facts) < 5:
                 raw_facts.append({
-                    "text": "Я заметил что-то странное, но забыл что.",
+                    "text": f"Я заметил что-то странное возле {scenario.location_of_body}, но не придал значения.",
                     "keyword": "Странность",
                     "type": "TESTIMONY"
                 })
@@ -160,8 +160,6 @@ class ScenarioGenerator:
                     ftype = FactType.TESTIMONY
 
                 keyword = f_data.get("keyword", "Улика")
-
-                # Обрезка keyword если LLM сошел с ума
                 if len(keyword) > 20: keyword = keyword[:20] + "."
 
                 fact = Fact(

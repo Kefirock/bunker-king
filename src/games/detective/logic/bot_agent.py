@@ -34,7 +34,6 @@ class DetectiveBotAgent:
 
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
-        # Заполняем новые поля
         prompt = prompt_template.format(
             name=bot.name,
             tag=prof.tag,
@@ -43,7 +42,6 @@ class DetectiveBotAgent:
             objective=prof.secret_objective,
 
             scenario_title=scenario_data.get("title", ""),
-            # Детали убийства для контекста
             victim=scenario_data.get("victim_name", "Неизвестный"),
             cause=scenario_data.get("cause_of_death", "Неизвестно"),
 
@@ -90,20 +88,26 @@ class DetectiveBotAgent:
 
         prof: DetectivePlayerProfile = bot.attributes.get("detective_profile")
 
+        # Исключаем себя из списка кандидатов (фикс само-голосования)
+        valid_candidates = [p for p in candidates if p.id != bot.id]
+
+        if not valid_candidates:
+            # Если голосовать не за кого (остался один), возвращаем пустоту или себя (технически)
+            return bot.attributes['detective_profile'].character_name
+
         if prof.role == RoleType.KILLER:
-            others = [p for p in candidates if p.id != bot.id]
-            target = random.choice(others).name if others else candidates[0].name
-            if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target}")
-            # Возвращаем имя ИГРОКА, так как Killer голосует стратегически (random тут заглушка)
-            # Но для LLM ниже мы просим выбрать Character Name
-            return target
+            # Убийца голосует случайно против любого другого
+            target = random.choice(valid_candidates)
+            target_char = target.attributes['detective_profile'].character_name
+            if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target_char}")
+            return target_char
 
         pub_str = "; ".join([f"{f.text}" for f in public_facts])
 
-        # Список для промпта: "Имя Персонажа (Имя Игрока)"
+        # Формируем список имен ПЕРСОНАЖЕЙ для промпта
         cand_str = ", ".join([
             f"{p.attributes['detective_profile'].character_name}"
-            for p in candidates
+            for p in valid_candidates
         ])
 
         prompt_template = detective_cfg.prompts["bot_player"]["vote"]
@@ -131,10 +135,13 @@ class DetectiveBotAgent:
 
             if logger: logger.log_event("BOT_VOTE_DECISION", f"{bot.name} voted against char {target_char}")
 
-            # Возвращаем Имя ПЕРСОНАЖА, движок переведет его в Имя Игрока
-            return target_char
+            # Проверяем, есть ли такой персонаж в валидных кандидатах
+            if any(p.attributes['detective_profile'].character_name == target_char for p in valid_candidates):
+                return target_char
+
+            # Если LLM ошиблась с именем, берем случайного
+            return random.choice(valid_candidates).attributes['detective_profile'].character_name
 
         except Exception as e:
             if logger: logger.log_event("BOT_VOTE_ERROR", str(e))
-            # Возвращаем имя первого кандидата (персонажа)
-            return candidates[0].attributes['detective_profile'].character_name
+            return random.choice(valid_candidates).attributes['detective_profile'].character_name

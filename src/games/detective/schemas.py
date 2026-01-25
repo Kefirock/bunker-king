@@ -43,9 +43,9 @@ class SuggestionData(BaseModel):
 
 class DetectivePlayerProfile(BaseModel):
     character_name: str = "Неизвестный"
-    tag: str = "Гость"  # НОВОЕ: Короткая роль (Жена, Повар) для чата
+    tag: str = "Гость"
     archetype: str = "Обыватель"
-    legend: str = ""  # Литературная легенда + связи
+    legend: str = ""
     role: RoleType = RoleType.INNOCENT
     secret_objective: str = ""
     inventory: List[str] = Field(default_factory=list)
@@ -62,6 +62,9 @@ class DetectiveScenario(BaseModel):
     time_of_death: str
     cause_of_death: str
     location_of_body: str
+
+    # Скрытая истина для генерации улик
+    timeline_truth: str = ""
 
     murder_method: str
     true_solution: str

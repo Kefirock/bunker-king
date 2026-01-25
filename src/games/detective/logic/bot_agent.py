@@ -34,16 +34,16 @@ class DetectiveBotAgent:
 
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
-        # ИСПРАВЛЕНО: Добавлен аргумент tag
+        # Заполняем новые поля
         prompt = prompt_template.format(
             name=bot.name,
             tag=prof.tag,
             character_name=prof.character_name,
-            archetype=prof.archetype,
             legend=prof.legend,
             objective=prof.secret_objective,
 
             scenario_title=scenario_data.get("title", ""),
+            # Детали убийства для контекста
             victim=scenario_data.get("victim_name", "Неизвестный"),
             cause=scenario_data.get("cause_of_death", "Неизвестно"),
 
@@ -58,6 +58,7 @@ class DetectiveBotAgent:
         model = core_cfg.models["player_models"][0]
 
         try:
+            # Динамическая температура
             temp_boost = 0.2 * (current_round / max_rounds)
             temp = 0.7 + temp_boost
 
@@ -93,12 +94,15 @@ class DetectiveBotAgent:
             others = [p for p in candidates if p.id != bot.id]
             target = random.choice(others).name if others else candidates[0].name
             if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target}")
+            # Возвращаем имя ИГРОКА, так как Killer голосует стратегически (random тут заглушка)
+            # Но для LLM ниже мы просим выбрать Character Name
             return target
 
         pub_str = "; ".join([f"{f.text}" for f in public_facts])
 
+        # Список для промпта: "Имя Персонажа (Имя Игрока)"
         cand_str = ", ".join([
-            f"{p.name} ({p.attributes['detective_profile'].character_name})"
+            f"{p.attributes['detective_profile'].character_name}"
             for p in candidates
         ])
 
@@ -107,9 +111,7 @@ class DetectiveBotAgent:
         prompt = prompt_template.format(
             character_name=prof.character_name,
             scenario_title=scenario_data.get("title", ""),
-
             victim=scenario_data.get("victim_name", "Неизвестный"),
-
             public_facts=pub_str,
             history="\n".join(history[-15:]),
             candidates=cand_str
@@ -125,14 +127,14 @@ class DetectiveBotAgent:
                 logger=logger
             )
             data = llm_client.parse_json(response)
-            target = data.get("vote_target_name", "")
+            target_char = data.get("vote_target_name", "")
 
-            if logger: logger.log_event("BOT_VOTE_DECISION", f"{bot.name} voted", data)
+            if logger: logger.log_event("BOT_VOTE_DECISION", f"{bot.name} voted against char {target_char}")
 
-            if any(p.name == target for p in candidates):
-                return target
-            return random.choice(candidates).name
+            # Возвращаем Имя ПЕРСОНАЖА, движок переведет его в Имя Игрока
+            return target_char
 
         except Exception as e:
             if logger: logger.log_event("BOT_VOTE_ERROR", str(e))
-            return random.choice(candidates).name
+            # Возвращаем имя первого кандидата (персонажа)
+            return candidates[0].attributes['detective_profile'].character_name

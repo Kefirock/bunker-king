@@ -28,7 +28,6 @@ class SuggestionAgent:
 
         prompt_template = detective_cfg.prompts["suggestion"]["system"]
 
-        # ИСПРАВЛЕНО: Добавлен аргумент tag
         prompt = prompt_template.format(
             character_name=prof.character_name,
             tag=prof.tag,

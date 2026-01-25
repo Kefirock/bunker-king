@@ -27,7 +27,7 @@ class NarratorAgent:
             response = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.8,
+                temperature=0.8,  # Чуть снизили для стабильности
                 logger=logger
             )
 

@@ -40,8 +40,9 @@ class ScenarioGenerator:
                 )
                 data = llm_client.parse_json(response)
 
-                required = ["roles", "victim", "solution"]
-                if not data or any(f not in data for f in required) or len(data["roles"]) < count:
+                # Валидация
+                required_fields = ["roles", "victim", "solution"]
+                if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
                     print("⚠️ Шаг 1: Ошибка структуры.")
                     continue
 
@@ -68,11 +69,15 @@ class ScenarioGenerator:
                 f"  Секрет: {r.get('secret')}"
             )
 
+        # ИСПРАВЛЕНО: Добавлен timeline
+        timeline_info = scenario_data.get("timeline_truth", "Неизвестно")
+
         facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
             victim=scenario_data.get("victim"),
             cause=scenario_data.get("cause_of_death"),
             location=scenario_data.get("location_of_body"),
             solution=scenario_data.get("solution"),
+            timeline=timeline_info,  # <--- ВОТ ЭТО БЫЛО ПРОПУЩЕНО
             characters_list="\n".join(roles_desc)
         )
 
@@ -80,11 +85,9 @@ class ScenarioGenerator:
 
         if logger: logger.log_event("GEN_STEP_2", "Generating Facts")
 
-        # Пробуем сгенерировать факты (2 попытки, если первая вернет мусор)
         for attempt in range(1, 3):
             try:
                 print(f"🧠 Шаг 2: Улики (Попытка {attempt})...")
-                # Снижаем температуру для точности имен
                 response_facts = await llm_client.generate(
                     model_config=model,
                     messages=[{"role": "system", "content": facts_prompt}],
@@ -99,16 +102,14 @@ class ScenarioGenerator:
                     if c_name:
                         temp_map[c_name] = item.get("facts", [])
 
-                # Проверяем, для всех ли есть факты
                 valid_count = 0
                 for char in expected_chars:
-                    # Простой поиск или нечеткий
                     if char in temp_map or any(char in k for k in temp_map.keys()):
                         valid_count += 1
 
                 if valid_count >= len(expected_chars):
                     facts_data_map = temp_map
-                    break  # Успех
+                    break
                 else:
                     print(f"⚠️ Шаг 2: Неполные факты ({valid_count}/{len(expected_chars)}). Retry.")
 
@@ -116,7 +117,6 @@ class ScenarioGenerator:
                 print(f"⚠️ Ошибка генерации фактов: {e}")
                 if logger: logger.log_event("GEN_FACTS_ERROR", str(e))
 
-        # --- СБОРКА РЕЗУЛЬТАТА ---
         return self._assemble_game_objects(scenario_data, facts_data_map, player_names)
 
     def _assemble_game_objects(self,
@@ -132,7 +132,8 @@ class ScenarioGenerator:
             cause_of_death=scen_data.get("cause_of_death", "Неизвестно"),
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
             murder_method=scen_data.get("method", "Unknown"),
-            true_solution=scen_data.get("solution", "Unknown")
+            true_solution=scen_data.get("solution", "Unknown"),
+            timeline_truth=scen_data.get("timeline_truth", "")  # Записываем таймлайн
         )
 
         player_profiles: Dict[str, DetectivePlayerProfile] = {}
@@ -144,7 +145,6 @@ class ScenarioGenerator:
             role_json = roles_data[i] if i < len(roles_data) else roles_data[0]
 
             char_name = role_json.get("character_name", f"Персонаж {i + 1}")
-
             r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
@@ -158,27 +158,22 @@ class ScenarioGenerator:
 
             # --- СТРОГИЙ ПОИСК ФАКТОВ ---
             raw_facts = []
-
-            # 1. Точное совпадение
             if char_name in facts_map:
                 raw_facts = facts_map[char_name]
             else:
-                # 2. Нечеткий поиск (на случай мелких опечаток LLM)
                 best_match = None
                 highest_ratio = 0.0
                 for key in facts_map.keys():
                     ratio = difflib.SequenceMatcher(None, char_name, key).ratio()
-                    if ratio > 0.8:  # Высокий порог, чтобы не перепутать имена
+                    if ratio > 0.8:
                         highest_ratio = ratio
                         best_match = key
 
                 if best_match:
                     raw_facts = facts_map[best_match]
 
-            # --- FAIL FAST ---
             if len(raw_facts) < 5:
-                # Если фактов нет или мало - это критическая ошибка генерации.
-                # Никаких заглушек. Игра не должна начаться.
+                # Если фактов нет - ошибка генерации, пусть перезапускают
                 raise ScenarioGenerationError(
                     f"Нейросеть не сгенерировала достаточно улик для {char_name}. Попробуйте снова.")
 

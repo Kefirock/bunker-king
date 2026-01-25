@@ -1,5 +1,6 @@
 import uuid
 import random
+import difflib
 from typing import List, Tuple, Dict
 from src.core.llm import llm_client
 from src.core.config import core_cfg
@@ -39,9 +40,8 @@ class ScenarioGenerator:
                 )
                 data = llm_client.parse_json(response)
 
-                # Валидация
-                required_fields = ["roles", "victim", "solution"]
-                if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
+                required = ["roles", "victim", "solution"]
+                if not data or any(f not in data for f in required) or len(data["roles"]) < count:
                     print("⚠️ Шаг 1: Ошибка структуры.")
                     continue
 
@@ -56,11 +56,13 @@ class ScenarioGenerator:
 
         # --- ШАГ 2: ГЕНЕРАЦИЯ УЛИК (ДЕТАЛИЗАЦИЯ) ---
 
-        # Передаем больше контекста для генератора фактов
         roles_desc = []
+        expected_chars = []
         for r in scenario_data["roles"]:
+            char_name = r.get('character_name', 'Unknown')
+            expected_chars.append(char_name)
             roles_desc.append(
-                f"- Имя: {r.get('character_name')} ({r.get('tag')})\n"
+                f"- Имя: {char_name} ({r.get('tag')})\n"
                 f"  Роль: {r.get('role')}\n"
                 f"  Легенда: {r.get('legend')}\n"
                 f"  Секрет: {r.get('secret')}"
@@ -78,22 +80,41 @@ class ScenarioGenerator:
 
         if logger: logger.log_event("GEN_STEP_2", "Generating Facts")
 
-        try:
-            print(f"🧠 Шаг 2: Улики (Фактура)...")
-            response_facts = await llm_client.generate(
-                model_config=model,
-                messages=[{"role": "system", "content": facts_prompt}],
-                temperature=0.85,  # Высокая температура для креатива в деталях
-                json_mode=True
-            )
-            parsed_facts = llm_client.parse_json(response_facts)
+        # Пробуем сгенерировать факты (2 попытки, если первая вернет мусор)
+        for attempt in range(1, 3):
+            try:
+                print(f"🧠 Шаг 2: Улики (Попытка {attempt})...")
+                # Снижаем температуру для точности имен
+                response_facts = await llm_client.generate(
+                    model_config=model,
+                    messages=[{"role": "system", "content": facts_prompt}],
+                    temperature=0.5,
+                    json_mode=True
+                )
+                parsed_facts = llm_client.parse_json(response_facts)
 
-            for item in parsed_facts.get("facts_by_character", []):
-                facts_data_map[item.get("character_name")] = item.get("facts", [])
+                temp_map = {}
+                for item in parsed_facts.get("facts_by_character", []):
+                    c_name = item.get("character_name", "").strip()
+                    if c_name:
+                        temp_map[c_name] = item.get("facts", [])
 
-        except Exception as e:
-            print(f"⚠️ Ошибка генерации фактов: {e}")
-            if logger: logger.log_event("GEN_FACTS_ERROR", str(e))
+                # Проверяем, для всех ли есть факты
+                valid_count = 0
+                for char in expected_chars:
+                    # Простой поиск или нечеткий
+                    if char in temp_map or any(char in k for k in temp_map.keys()):
+                        valid_count += 1
+
+                if valid_count >= len(expected_chars):
+                    facts_data_map = temp_map
+                    break  # Успех
+                else:
+                    print(f"⚠️ Шаг 2: Неполные факты ({valid_count}/{len(expected_chars)}). Retry.")
+
+            except Exception as e:
+                print(f"⚠️ Ошибка генерации фактов: {e}")
+                if logger: logger.log_event("GEN_FACTS_ERROR", str(e))
 
         # --- СБОРКА РЕЗУЛЬТАТА ---
         return self._assemble_game_objects(scenario_data, facts_data_map, player_names)
@@ -123,6 +144,7 @@ class ScenarioGenerator:
             role_json = roles_data[i] if i < len(roles_data) else roles_data[0]
 
             char_name = role_json.get("character_name", f"Персонаж {i + 1}")
+
             r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
@@ -134,17 +156,31 @@ class ScenarioGenerator:
                 secret_objective=role_json.get("secret", "")
             )
 
-            # Достаем факты по имени персонажа
-            # (Иногда LLM чуть меняет имя, поэтому можно добавить fuzzy match, но пока строго)
-            raw_facts = facts_map.get(char_name, [])
+            # --- СТРОГИЙ ПОИСК ФАКТОВ ---
+            raw_facts = []
 
-            # Fallback
-            while len(raw_facts) < 5:
-                raw_facts.append({
-                    "text": f"Я заметил что-то странное возле {scenario.location_of_body}, но не придал значения.",
-                    "keyword": "Странность",
-                    "type": "TESTIMONY"
-                })
+            # 1. Точное совпадение
+            if char_name in facts_map:
+                raw_facts = facts_map[char_name]
+            else:
+                # 2. Нечеткий поиск (на случай мелких опечаток LLM)
+                best_match = None
+                highest_ratio = 0.0
+                for key in facts_map.keys():
+                    ratio = difflib.SequenceMatcher(None, char_name, key).ratio()
+                    if ratio > 0.8:  # Высокий порог, чтобы не перепутать имена
+                        highest_ratio = ratio
+                        best_match = key
+
+                if best_match:
+                    raw_facts = facts_map[best_match]
+
+            # --- FAIL FAST ---
+            if len(raw_facts) < 5:
+                # Если фактов нет или мало - это критическая ошибка генерации.
+                # Никаких заглушек. Игра не должна начаться.
+                raise ScenarioGenerationError(
+                    f"Нейросеть не сгенерировала достаточно улик для {char_name}. Попробуйте снова.")
 
             for f_data in raw_facts[:5]:
                 fid = str(uuid.uuid4())[:8]
@@ -160,7 +196,7 @@ class ScenarioGenerator:
                     ftype = FactType.TESTIMONY
 
                 keyword = f_data.get("keyword", "Улика")
-                if len(keyword) > 20: keyword = keyword[:20] + "."
+                if len(keyword) > 25: keyword = keyword[:25] + "."
 
                 fact = Fact(
                     id=fid,

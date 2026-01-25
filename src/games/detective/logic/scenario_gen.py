@@ -13,16 +13,46 @@ class ScenarioGenerationError(Exception):
 
 
 class ScenarioGenerator:
+    def _build_plot_skeleton(self) -> str:
+        """Собирает случайный скелет сюжета из модулей"""
+        modules = detective_cfg.modules
+
+        setting = random.choice(modules.get("settings", ["Особняк"]))
+        victim = random.choice(modules.get("victims", ["Тиран"]))
+        method = random.choice(modules.get("methods", ["Яд"]))
+        motive = random.choice(modules.get("motives", ["Деньги"]))
+
+        # 50% шанс на твист
+        has_twist = random.random() > 0.5
+        twist = random.choice(
+            modules.get("twists", ["Ошибка"])) if has_twist else "Отсутствует (Классическое расследование)"
+
+        return (
+            f"- СЕТТИНГ: {setting}\n"
+            f"- ЖЕРТВА: {victim}\n"
+            f"- СПОСОБ УБИЙСТВА: {method}\n"
+            f"- МОТИВ УБИЙЦЫ: {motive}\n"
+            f"- СЮЖЕТНЫЙ ТВИСТ: {twist}"
+        )
+
     async def generate(self, player_names: List[str], logger=None) -> Tuple[
         DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
         count = len(player_names)
         model = core_cfg.models["player_models"][0]
         max_attempts = 3
 
-        # --- ШАГ 1: ГЕНЕРАЦИЯ СЮЖЕТА И РОЛЕЙ ---
+        # --- ШАГ 0: СБОРКА КОНСТРУКТОРА ---
+        plot_skeleton = self._build_plot_skeleton()
+
+        if logger:
+            logger.log_event("DIRECTOR_MODE", "Plot skeleton assembled", {"skeleton": plot_skeleton})
+            print(f"🎬 Режиссер собрал сюжет:\n{plot_skeleton}")
+
+        # --- ШАГ 1: ГЕНЕРАЦИЯ СЦЕНАРИЯ ПО ТЗ ---
 
         master_prompt = detective_cfg.prompts["scenario_master"]["system"].format(
-            player_count=count
+            player_count=count,
+            plot_skeleton=plot_skeleton  # <--- Передаем скелет
         )
 
         scenario_data = None
@@ -35,7 +65,7 @@ class ScenarioGenerator:
                 response = await llm_client.generate(
                     model_config=model,
                     messages=[{"role": "system", "content": master_prompt}],
-                    temperature=0.8,
+                    temperature=0.85,  # Высокая температура для литературной обработки скелета
                     json_mode=True
                 )
                 data = llm_client.parse_json(response)
@@ -69,7 +99,6 @@ class ScenarioGenerator:
                 f"  Секрет: {r.get('secret')}"
             )
 
-        # ИСПРАВЛЕНО: Добавлен timeline
         timeline_info = scenario_data.get("timeline_truth", "Неизвестно")
 
         facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
@@ -77,7 +106,7 @@ class ScenarioGenerator:
             cause=scenario_data.get("cause_of_death"),
             location=scenario_data.get("location_of_body"),
             solution=scenario_data.get("solution"),
-            timeline=timeline_info,  # <--- ВОТ ЭТО БЫЛО ПРОПУЩЕНО
+            timeline=timeline_info,
             characters_list="\n".join(roles_desc)
         )
 
@@ -91,7 +120,7 @@ class ScenarioGenerator:
                 response_facts = await llm_client.generate(
                     model_config=model,
                     messages=[{"role": "system", "content": facts_prompt}],
-                    temperature=0.5,
+                    temperature=0.6,  # Чуть ниже для точности фактов
                     json_mode=True
                 )
                 parsed_facts = llm_client.parse_json(response_facts)
@@ -133,7 +162,7 @@ class ScenarioGenerator:
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
             murder_method=scen_data.get("method", "Unknown"),
             true_solution=scen_data.get("solution", "Unknown"),
-            timeline_truth=scen_data.get("timeline_truth", "")  # Записываем таймлайн
+            timeline_truth=scen_data.get("timeline_truth", "")
         )
 
         player_profiles: Dict[str, DetectivePlayerProfile] = {}
@@ -173,7 +202,6 @@ class ScenarioGenerator:
                     raw_facts = facts_map[best_match]
 
             if len(raw_facts) < 5:
-                # Если фактов нет - ошибка генерации, пусть перезапускают
                 raise ScenarioGenerationError(
                     f"Нейросеть не сгенерировала достаточно улик для {char_name}. Попробуйте снова.")
 

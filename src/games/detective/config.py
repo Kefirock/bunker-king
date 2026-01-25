@@ -11,7 +11,8 @@ class DetectiveConfig:
             os.makedirs(self.base_dir, exist_ok=True)
 
         self.prompts = self._load("prompts.yaml")
-        self.gameplay = self._load("gameplay.yaml") # <--- НОВОЕ
+        self.gameplay = self._load("gameplay.yaml")
+        self.modules = self._load("modules.yaml") # <--- НОВОЕ
 
     def _load(self, filename: str):
         path = os.path.join(self.base_dir, filename)

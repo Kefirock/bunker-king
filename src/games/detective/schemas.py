@@ -47,7 +47,12 @@ class DetectivePlayerProfile(BaseModel):
     archetype: str = "Обыватель"
     legend: str = ""
     role: RoleType = RoleType.INNOCENT
-    secret_objective: str = ""
+
+    # НОВЫЕ ПОЛЯ
+    secret_objective: str = ""  # Вторичная цель (Вор, Любовник)
+    assigned_marker: str = ""  # Физический маркер (Грязь, Запах)
+    starting_location: str = ""  # Где был в момент убийства (из Алиби-матрицы)
+
     inventory: List[str] = Field(default_factory=list)
     published_facts_count: int = 0
     last_suggestions: Optional[SuggestionData] = None
@@ -63,8 +68,10 @@ class DetectiveScenario(BaseModel):
     cause_of_death: str
     location_of_body: str
 
-    # Скрытая истина для генерации улик
-    timeline_truth: str = ""
+    # Структурные данные
+    tech_level: str = "1920s"  # Эпоха
+    available_rooms: List[str] = []  # Список комнат в этом сценарии
+    alibi_matrix: str = ""  # Текстовое описание кто с кем был
 
     murder_method: str
     true_solution: str

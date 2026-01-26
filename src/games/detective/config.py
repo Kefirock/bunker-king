@@ -12,7 +12,7 @@ class DetectiveConfig:
 
         self.prompts = self._load("prompts.yaml")
         self.gameplay = self._load("gameplay.yaml")
-        self.modules = self._load("modules.yaml") # <--- НОВОЕ
+        self.modules = self._load("modules.yaml")
 
     def _load(self, filename: str):
         path = os.path.join(self.base_dir, filename)

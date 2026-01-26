@@ -30,7 +30,15 @@ class DetectiveBotAgent:
             if fact and not fact.is_public:
                 inv_lines.append(f"ID: {fid} | [{fact.type}] {fact.text}")
 
-        inv_str = "\n".join(inv_lines) if inv_lines else "Пусто"
+        inv_str = "\n".join(inv_lines) if inv_lines else "Пусто (или все вскрыто)"
+
+        # --- ЛОГИКА ПЕРВОГО ХОДА ---
+        # Если история пуста, добавляем системное событие, чтобы бот реагировал на труп
+        current_history = history
+        if not current_history:
+            victim = scenario_data.get("victim", "Жертва")
+            loc = scenario_data.get("location_of_body", "Дом")
+            current_history = [f"[SYSTEM]: Труп {victim} только что найден в {loc}. Все в шоке."]
 
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
@@ -43,12 +51,10 @@ class DetectiveBotAgent:
 
             scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
-            cause=scenario_data.get("cause_of_death", "Неизвестно"),
 
             public_facts=pub_str,
             inventory=inv_str,
-            history="\n".join(history[-10:]),
-            published_count=prof.published_facts_count,
+            history="\n".join(current_history[-10:]),
             current_round=current_round,
             max_rounds=max_rounds
         )
@@ -56,7 +62,8 @@ class DetectiveBotAgent:
         model = core_cfg.models["player_models"][0]
 
         try:
-            # Динамическая температура
+            # Динамическая температура: от 0.7 (начало) до 0.9 (финал)
+            # В финале боты должны быть более эмоциональными и непредсказуемыми
             temp_boost = 0.2 * (current_round / max_rounds)
             temp = 0.7 + temp_boost
 
@@ -88,23 +95,22 @@ class DetectiveBotAgent:
 
         prof: DetectivePlayerProfile = bot.attributes.get("detective_profile")
 
-        # Исключаем себя из списка кандидатов (фикс само-голосования)
+        # 1. Исключаем себя из кандидатов
         valid_candidates = [p for p in candidates if p.id != bot.id]
-
         if not valid_candidates:
-            # Если голосовать не за кого (остался один), возвращаем пустоту или себя (технически)
+            # Если некого выбирать, возвращаем себя (движок это обработает)
             return bot.attributes['detective_profile'].character_name
 
+        # 2. Логика Убийцы: голосует случайно против любого невиновного, чтобы сбить след
         if prof.role == RoleType.KILLER:
-            # Убийца голосует случайно против любого другого
             target = random.choice(valid_candidates)
             target_char = target.attributes['detective_profile'].character_name
             if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target_char}")
             return target_char
 
+        # 3. Логика Невиновного: думает
         pub_str = "; ".join([f"{f.text}" for f in public_facts])
 
-        # Формируем список имен ПЕРСОНАЖЕЙ для промпта
         cand_str = ", ".join([
             f"{p.attributes['detective_profile'].character_name}"
             for p in valid_candidates
@@ -126,7 +132,7 @@ class DetectiveBotAgent:
             response = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+                temperature=0.3,  # Низкая температура для точного выбора имени
                 json_mode=True,
                 logger=logger
             )
@@ -135,11 +141,11 @@ class DetectiveBotAgent:
 
             if logger: logger.log_event("BOT_VOTE_DECISION", f"{bot.name} voted against char {target_char}")
 
-            # Проверяем, есть ли такой персонаж в валидных кандидатах
+            # Проверка на галлюцинации (выбрал имя не из списка)
             if any(p.attributes['detective_profile'].character_name == target_char for p in valid_candidates):
                 return target_char
 
-            # Если LLM ошиблась с именем, берем случайного
+            # Fallback: случайный валидный кандидат
             return random.choice(valid_candidates).attributes['detective_profile'].character_name
 
         except Exception as e:

@@ -33,7 +33,7 @@ class DetectiveGame(GameEngine):
         self.logger.log_event("INIT_START", f"Init for {len(users_data)} users")
         names = [u["name"] for u in users_data]
 
-        # 1. Генерация сценария
+        # 1. Генерация сценария (Сюжет + Роли)
         try:
             scenario, profiles_map = await self.scenario_gen.generate(names, logger=self.logger)
         except ScenarioGenerationError as e:
@@ -94,13 +94,13 @@ class DetectiveGame(GameEngine):
 
         events = []
 
-        # Стартовые сообщения
+        # ПОЛИЦЕЙСКИЙ ПРОТОКОЛ (Используем новые поля из процедурного сценария)
         protocol = (
             f"📄 <b>ПОЛИЦЕЙСКИЙ ПРОТОКОЛ</b>\n\n"
             f"👤 <b>Жертва:</b> {scenario.victim_name}\n"
-            f"🕒 <b>Время:</b> {scenario.time_of_death}\n"
+            f"🕒 <b>Время смерти:</b> {scenario.time_of_death}\n"
             f"📍 <b>Место:</b> {scenario.location_of_body}\n"
-            f"💀 <b>Причина смерти:</b> {scenario.cause_of_death}\n"
+            f"💀 <b>Причина:</b> {scenario.cause_of_death}\n"
         )
         events.append(GameEvent(type="message", content=protocol))
 
@@ -167,7 +167,8 @@ class DetectiveGame(GameEngine):
             msg_token = f"turn_{t_count}_{current_player.id}"
             self.state.shared_data["turn_count"] += 1
 
-            events.append(GameEvent(type="message", content=f"⏳ <b>{display_name}</b> пишет...", token=msg_token))
+            events.append(
+                GameEvent(type="message", content=f"⏳ <b>{prof.character_name}</b> пишет...", token=msg_token))
             events.append(GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id}))
             return events
 
@@ -184,7 +185,7 @@ class DetectiveGame(GameEngine):
                 events.append(GameEvent(
                     type="message",
                     target_ids=others,
-                    content=f"⏳ Ходит <b>{display_name}</b>..."
+                    content=f"⏳ Ходит <b>{prof.character_name}</b>..."
                 ))
             return events
 
@@ -220,7 +221,7 @@ class DetectiveGame(GameEngine):
             events.extend(reveal_events)
 
         prof = bot.attributes["detective_profile"]
-        display_name = f"{prof.character_name}"  # Для истории достаточно имени
+        display_name = f"{prof.character_name}"
 
         self.state.history.append(f"[{display_name}]: {speech}")
 
@@ -249,15 +250,11 @@ class DetectiveGame(GameEngine):
         self.logger.log_event("CHAT", f"{p.name} -> {text}")
 
         my_prof = p.attributes["detective_profile"]
-        my_char_name = my_prof.character_name
-        my_tag = my_prof.tag
+        my_display = f"{my_prof.character_name} [{my_prof.tag}]"
 
-        # В историю пишем: [Дворецкий Бэрримор]: текст
-        self.state.history.append(f"[{my_char_name}]: {text}")
+        self.state.history.append(f"[{my_prof.character_name}]: {text}")
 
-        # В чат пишем: Alexey [Дворецкий]: текст
-        msg = f"<b>{p.name} [{my_tag}]</b>: {text}"
-
+        msg = f"<b>{my_display}</b>: {text}"
         others = [x.id for x in self.players if x.id != player_id]
         events = [GameEvent(type="message", target_ids=others, content=msg)]
 
@@ -319,7 +316,6 @@ class DetectiveGame(GameEngine):
         fact = all_facts.get(fact_id)
         if not fact: return []
 
-        # ПРОВЕРКА НА ДУБЛИРОВАНИЕ
         if fact["is_public"] or fact_id in self.state.shared_data["public_facts"]:
             return [GameEvent(type="callback_answer", target_ids=[player.id], content="Уже вскрыто!")]
 
@@ -377,7 +373,6 @@ class DetectiveGame(GameEngine):
             if p.is_human:
                 kb = []
                 for cand in candidates:
-                    # Исключаем себя из UI
                     if cand.id == p.id: continue
 
                     prof = cand.attributes["detective_profile"]
@@ -405,11 +400,9 @@ class DetectiveGame(GameEngine):
                     p, self.players, scen_data, self.state.history, pub_facts, logger=self.logger
                 )
 
-                # Ищем игрока по Имени Персонажа
                 target_player = next((tp for tp in self.players if
                                       tp.attributes["detective_profile"].character_name == vote_target_char), None)
 
-                # Fallback: если бот придумал имя, которого нет
                 if not target_player:
                     others = [op for op in self.players if op.id != p.id]
                     target_player = others[0] if others else p

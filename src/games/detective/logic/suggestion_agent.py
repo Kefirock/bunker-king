@@ -28,9 +28,10 @@ class SuggestionAgent:
 
         prompt_template = detective_cfg.prompts["suggestion"]["system"]
 
+        # ВАЖНО: Передаем tag в промпт
         prompt = prompt_template.format(
             character_name=prof.character_name,
-            tag=prof.tag,
+            tag=prof.tag,  # <--- ВОТ ЭТА СТРОКА ОБЯЗАТЕЛЬНА
             legend=prof.legend,
 
             victim=scenario_data.get("victim_name", "Неизвестный"),

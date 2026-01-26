@@ -32,21 +32,24 @@ class DetectiveBotAgent:
 
         inv_str = "\n".join(inv_lines) if inv_lines else "Пусто"
 
-        # Загружаем промпт
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
+        # ВАЖНО: Передаем tag в промпт
         prompt = prompt_template.format(
             name=bot.name,
-            tag=prof.tag,
-            legend=prof.legend,  # Использование единой легенды
+            tag=prof.tag,  # <--- ВОТ ЭТА СТРОКА ОБЯЗАТЕЛЬНА
+            character_name=prof.character_name,
+            legend=prof.legend,
             objective=prof.secret_objective,
 
-            # Данные из процедурного сценария
+            scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
+            cause=scenario_data.get("cause_of_death", "Неизвестно"),
 
             public_facts=pub_str,
             inventory=inv_str,
             history="\n".join(history[-10:]),
+            published_count=prof.published_facts_count,
             current_round=current_round,
             max_rounds=max_rounds
         )
@@ -54,7 +57,6 @@ class DetectiveBotAgent:
         model = core_cfg.models["player_models"][0]
 
         try:
-            # Динамическая температура: выше к концу игры
             temp_boost = 0.2 * (current_round / max_rounds)
             temp = 0.7 + temp_boost
 
@@ -86,30 +88,24 @@ class DetectiveBotAgent:
 
         prof: DetectivePlayerProfile = bot.attributes.get("detective_profile")
 
-        # 1. Исключаем себя из кандидатов
-        valid_candidates = [p for p in candidates if p.id != bot.id]
-        if not valid_candidates:
-            return bot.attributes['detective_profile'].character_name
-
-        # 2. Логика Убийцы: голосует случайно против любого невиновного
         if prof.role == RoleType.KILLER:
-            target = random.choice(valid_candidates)
-            target_char = target.attributes['detective_profile'].character_name
-            if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target_char}")
-            return target_char
+            others = [p for p in candidates if p.id != bot.id]
+            target = random.choice(others).name if others else candidates[0].name
+            if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target}")
+            return target
 
-        # 3. Логика Невиновного
         pub_str = "; ".join([f"{f.text}" for f in public_facts])
 
         cand_str = ", ".join([
             f"{p.attributes['detective_profile'].character_name}"
-            for p in valid_candidates
+            for p in candidates
         ])
 
         prompt_template = detective_cfg.prompts["bot_player"]["vote"]
 
         prompt = prompt_template.format(
             character_name=prof.character_name,
+            scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
             public_facts=pub_str,
             history="\n".join(history[-15:]),
@@ -130,12 +126,11 @@ class DetectiveBotAgent:
 
             if logger: logger.log_event("BOT_VOTE_DECISION", f"{bot.name} voted against char {target_char}")
 
-            # Проверка на галлюцинации
-            if any(p.attributes['detective_profile'].character_name == target_char for p in valid_candidates):
+            if any(p.attributes['detective_profile'].character_name == target_char for p in candidates):
                 return target_char
 
-            return random.choice(valid_candidates).attributes['detective_profile'].character_name
+            return random.choice(candidates).attributes['detective_profile'].character_name
 
         except Exception as e:
             if logger: logger.log_event("BOT_VOTE_ERROR", str(e))
-            return random.choice(valid_candidates).attributes['detective_profile'].character_name
+            return random.choice(candidates).attributes['detective_profile'].character_name

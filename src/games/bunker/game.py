@@ -26,8 +26,9 @@ class BunkerGame(GameEngine):
         self.current_turn_index = 0
         self.votes: Dict[str, str] = {}
 
-    # ДОБАВЛЕНО ASYNC
     async def init_game(self, users_data: List[Dict]) -> List[GameEvent]:
+        self.logger.log_event("INIT", f"Starting game with {len(users_data)} users", {"users": users_data})
+
         self.players = BunkerUtils.generate_initial_players(users_data)
 
         catastrophe = random.choice(bunker_cfg.scenarios["catastrophes"])
@@ -64,6 +65,8 @@ class BunkerGame(GameEngine):
 
         cat_name = catastrophe["name"]
         events.append(GameEvent(type="message", content=f"☢️ <b>ИГРА НАЧАЛАСЬ!</b>\nСценарий: <b>{cat_name}</b>"))
+
+        self.logger.log_event("START", f"Scenario: {cat_name}")
         return events
 
     # --- ЭТАП 1: ОБЪЯВЛЕНИЕ ХОДА ---
@@ -77,11 +80,20 @@ class BunkerGame(GameEngine):
         else:
             active_list = alive_players
 
+        # Логируем состояние очереди
+        active_names = [p.name for p in active_list]
+        self.logger.log_event("TURN_CHECK", f"Index: {self.current_turn_index}/{len(active_list)}",
+                              {"queue": active_names})
+
         if self.current_turn_index >= len(active_list):
+            self.logger.log_event("PHASE_END", f"End of {self.state.phase}, switching...")
             return await self._next_phase()
 
         current_player = active_list[self.current_turn_index]
         personal_topic = self._get_personal_topic(current_player)
+
+        self.logger.log_event("TURN_START",
+                              f"Active player: {current_player.name} (ID: {current_player.id}, Human: {current_player.is_human})")
 
         # ХОД ЧЕЛОВЕКА
         if current_player.is_human:
@@ -147,6 +159,7 @@ class BunkerGame(GameEngine):
             )
 
             self.state.history.append(f"[{bot.name}]: {speech}")
+            self.logger.log_event("BOT_SPEECH", f"{bot.name}: {speech}")
 
             display_name = BunkerUtils.get_display_name(bot, self.state.round)
             final_msg = f"{display_name}:\n{speech}"
@@ -154,6 +167,7 @@ class BunkerGame(GameEngine):
             events.append(GameEvent(type="edit_message", content=final_msg, token=token))
 
         except Exception as e:
+            self.logger.log_event("BOT_ERROR", f"Critical Bot Error: {e}")
             print(f"🔥 Critical Bot Error: {e}")
             events.append(GameEvent(type="edit_message", content=f"⚠️ {bot.name} потерял связь.", token=token))
 
@@ -179,12 +193,14 @@ class BunkerGame(GameEngine):
         if self.current_turn_index < len(active_list):
             expected = active_list[self.current_turn_index]
             if expected.id != player_id:
+                # self.logger.log_event("INPUT_REJECT", f"{player.name} tried to speak out of turn. Expected: {expected.name}")
                 return [
                     GameEvent(type="message", target_ids=[player_id], content=f"⚠️ Сейчас очередь {expected.name}!")]
         else:
             return []
 
         self.state.history.append(f"[{player.name}]: {text}")
+        self.logger.log_event("CHAT", f"{player.name}: {text}")
 
         personal_topic = self._get_personal_topic(player)
         await self.judge_agent.analyze_move(player, text, personal_topic, self.state.round, logger=self.logger)
@@ -212,10 +228,11 @@ class BunkerGame(GameEngine):
             return [GameEvent(type="callback_answer", target_ids=[player_id], content="Вы уже голосовали")]
 
         self.votes[player.name] = target_name
+        self.logger.log_event("VOTE", f"{player.name} voted for {target_name}")
 
         events = [
-            GameEvent(type="callback_answer", target_ids=[player_id], content=f"Голос принят: {target_name}"),
-            GameEvent(type="message", target_ids=[player_id], content=f"Вы -> <b>{target_name}</b>")
+            GameEvent(type="callback_answer", target_ids=[player.id], content=f"Голос принят: {target_name}"),
+            GameEvent(type="message", target_ids=[player.id], content=f"Вы -> <b>{target_name}</b>")
         ]
 
         alive_count = sum(1 for p in self.players if p.is_alive)
@@ -232,6 +249,7 @@ class BunkerGame(GameEngine):
 
         player.is_alive = False
         self._mark_dead_in_history(player.name)
+        self.logger.log_event("PLAYER_LEFT", f"{player.name} left the game")
 
         events.append(GameEvent(type="message", content=f"🚪 <b>{player.name}</b> покинул игру (дезертировал)."))
 
@@ -286,6 +304,7 @@ class BunkerGame(GameEngine):
         if round_num == 1:
             return topics_cfg[1].format(catastrophe=catastrophe["name"])
         elif round_num == 2:
+            # FIX: Передаем catastrophe, так как в конфиге она есть в строке
             return topics_cfg[2].format(trait="Твоя черта", catastrophe=catastrophe["name"])
         else:
             idx = (round_num - 3) % len(catastrophe["topics"])
@@ -297,6 +316,7 @@ class BunkerGame(GameEngine):
         if self.state.round == 2 and self.state.phase == "presentation":
             topics_cfg = bunker_cfg.gameplay["rounds"]["topics"]
             real_trait = player.attributes.get("trait", "???")
+            # FIX: Передаем catastrophe
             return topics_cfg[2].format(trait=real_trait, catastrophe=catastrophe["name"])
         return self.state.shared_data["topic"]
 
@@ -305,6 +325,7 @@ class BunkerGame(GameEngine):
         if self.state.phase == "presentation":
             self.state.phase = "discussion"
             self.current_turn_index = 0
+            self.logger.log_event("PHASE", "Discussion started")
 
             dash = BunkerUtils.generate_dashboard(self.state.shared_data["topic"], self.state.round, self.state.phase,
                                                   [p for p in self.players if p.is_alive])
@@ -315,6 +336,7 @@ class BunkerGame(GameEngine):
 
         elif self.state.phase in ["discussion", "runoff"]:
             self.state.phase = "voting"
+            self.logger.log_event("PHASE", "Voting started")
             events.extend(await self._start_voting_phase())
         return events
 
@@ -368,6 +390,8 @@ class BunkerGame(GameEngine):
         leader_name, leader_votes = results[0]
         leaders = [name for name, count in results if count == leader_votes]
 
+        self.logger.log_event("VOTE_RESULT", f"Leaders: {leaders}", {"counts": dict(counts)})
+
         res_text = "📊 <b>ИТОГИ:</b>\n"
         for name, cnt in counts.items():
             res_text += f"{name}: {cnt}\n"
@@ -397,6 +421,7 @@ class BunkerGame(GameEngine):
         if eliminated:
             eliminated.is_alive = False
             self._mark_dead_in_history(eliminated.name)
+            self.logger.log_event("ELIMINATED", f"{eliminated.name}")
             events.append(GameEvent(type="message", content=f"🚪 <b>{eliminated.name}</b> был изгнан."))
 
         survivors = [p for p in self.players if p.is_alive]

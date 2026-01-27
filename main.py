@@ -15,7 +15,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.bot import DefaultBotProperties
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter
 from aiohttp import web
 
 from src.core.schemas import GameEvent
@@ -131,6 +131,13 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
     should_delete_game = False
 
+    # Хелпер для логирования в игру
+    def log_net(event_type: str, msg: str, details: dict = None):
+        if hasattr(game, "logger") and game.logger:
+            game.logger.log_event(event_type, msg, details)
+        else:
+            print(f"[{event_type}] {msg}")
+
     for event in events:
         try:
             if event.type == "game_over":
@@ -145,6 +152,7 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                         except:
                             pass
 
+            # --- ОТПРАВКА СООБЩЕНИЙ ---
             if event.type == "message":
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 kb = None
@@ -157,48 +165,78 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
 
                 for tid in targets:
                     if tid > 0:
-                        sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
+                        try:
+                            sent_msg = await bot.send_message(chat_id=tid, text=event.content, reply_markup=kb)
 
-                        if event.extra_data.get("is_dashboard"):
-                            if game.lobby_id not in dashboard_map: dashboard_map[game.lobby_id] = {}
-                            dashboard_map[game.lobby_id][tid] = sent_msg.message_id
-                            try:
-                                await bot.pin_chat_message(chat_id=tid, message_id=sent_msg.message_id)
-                            except:
-                                pass
+                            # Log success (optional verbose)
+                            # log_net("NET_SEND_OK", f"Msg to {tid} sent")
 
-                        if event.token:
-                            message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
+                            if event.extra_data.get("is_dashboard"):
+                                if game.lobby_id not in dashboard_map: dashboard_map[game.lobby_id] = {}
+                                dashboard_map[game.lobby_id][tid] = sent_msg.message_id
+                                try:
+                                    await bot.pin_chat_message(chat_id=tid, message_id=sent_msg.message_id)
+                                except:
+                                    pass
+
+                            if event.token:
+                                message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
+
+                        except TelegramForbiddenError:
+                            log_net("NET_BLOCK", f"User {tid} blocked bot. Marking as dead.")
+                            # Можно вызвать game.player_leave(tid), но это изменит стейт в цикле.
+                            # Пока просто логируем.
+                        except Exception as e:
+                            log_net("NET_ERROR", f"Send to {tid} failed: {e}")
 
                     elif tid <= -50000 and ADMIN_ID:
-                        fake_p = next((p for p in game.players if p.id == tid), None)
-                        if fake_p and fake_p.is_alive:
-                            debug_text = f"🔧 <b>[To {fake_p.name}]</b>:\n{event.content}"
-                            try:
-                                await bot.send_message(chat_id=ADMIN_ID, text=debug_text)
-                            except:
-                                pass
+                        # Debug fake users
+                        try:
+                            await bot.send_message(chat_id=ADMIN_ID, text=f"🔧 <b>[To Fake {tid}]</b>:\n{event.content}")
+                        except:
+                            pass
 
+            # --- РЕДАКТИРОВАНИЕ СООБЩЕНИЙ ---
             elif event.type == "edit_message":
                 targets = event.target_ids if event.target_ids else [p.id for p in game.players if p.is_human]
                 for tid in targets:
                     if tid < 0: continue
                     msg_id = message_tokens.get(f"{tid}:{event.token}")
+
                     if msg_id:
                         try:
                             await bot.edit_message_text(chat_id=tid, message_id=msg_id, text=event.content)
-                        except:
-                            pass
+                        except TelegramBadRequest as e:
+                            # Ошибка: сообщение не найдено, не изменилось или удалено
+                            error_text = str(e).lower()
+                            if "message is not modified" in error_text:
+                                pass  # Игнорируем, всё ок
+                            else:
+                                log_net("NET_EDIT_FAIL", f"Edit failed for {tid}: {e}. Fallback to SEND.")
+                                # FALLBACK: Отправляем новое, если старое нельзя редактировать
+                                try:
+                                    sent_msg = await bot.send_message(chat_id=tid, text=event.content)
+                                    message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id  # Обновляем токен
+                                except Exception as e2:
+                                    log_net("NET_FALLBACK_FAIL", f"Fallback send failed for {tid}: {e2}")
+                        except Exception as e:
+                            log_net("NET_ERROR", f"Edit error for {tid}: {e}")
                     else:
-                        await bot.send_message(chat_id=tid, text=event.content)
+                        # Если токена нет, просто шлем новое
+                        try:
+                            sent_msg = await bot.send_message(chat_id=tid, text=event.content)
+                            if event.token:
+                                message_tokens[f"{tid}:{event.token}"] = sent_msg.message_id
+                        except Exception as e:
+                            log_net("NET_ERROR", f"Send (no token) failed for {tid}: {e}")
 
             elif event.type == "update_dashboard":
                 if game.lobby_id in dashboard_map:
                     for uid, msg_id in dashboard_map[game.lobby_id].items():
                         try:
                             await bot.edit_message_text(chat_id=uid, message_id=msg_id, text=event.content)
-                        except:
-                            pass
+                        except Exception as e:
+                            log_net("NET_DASH_FAIL", f"Dashboard update failed for {uid}: {e}")
 
             elif event.type == "callback_answer":
                 if event.target_ids and event.target_ids[0] > 0:
@@ -211,12 +249,15 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
             elif event.type == "game_over":
                 targets = [p.id for p in game.players if p.is_human]
                 for tid in targets:
-                    if tid > 0: await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
+                    if tid > 0:
+                        try:
+                            await bot.send_message(tid, f"🏁 <b>GAME OVER</b>\n{event.content}")
+                        except:
+                            pass
 
                 if hasattr(game, "logger") and game.logger:
                     local_path = game.logger.get_session_path()
                     s3_path = game.logger.get_s3_target_path()
-                    # Финальная выгрузка с удалением
                     asyncio.create_task(asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path, True))
 
             elif event.type == "switch_turn":
@@ -229,7 +270,8 @@ async def process_game_events(context_id: str, events: list[GameEvent]):
                 await process_game_events(game.lobby_id, bot_events)
 
         except Exception as e:
-            logging.error(f"Event Error ({event.type}): {e}")
+            logging.error(f"Global Event Error ({event.type}): {e}")
+            log_net("CRITICAL", f"Event processing crashed: {e}")
 
     if should_delete_game:
         if game.lobby_id in active_games: del active_games[game.lobby_id]
@@ -245,29 +287,24 @@ async def cmd_send_logs(message: Message):
     user_id = message.from_user.id
     if not ADMIN_ID or user_id != ADMIN_ID: return
 
-    # Пытаемся найти игру, где админ - игрок или хост
     lid = lobby_manager.user_to_lobby.get(user_id)
     if not lid and str(user_id) in active_games:
         lid = str(user_id)
 
     if not lid or lid not in active_games:
-        await message.reply("⚠️ Нет активной игры для отправки логов.")
+        await message.reply("⚠️ Нет активной игры.")
         return
 
     game = active_games[lid]
     if not hasattr(game, "logger") or not game.logger:
-        await message.reply("⚠️ У этой игры нет логгера.")
+        await message.reply("⚠️ Нет логгера.")
         return
 
-    # Выгружаем без удаления
     local_path = game.logger.get_session_path()
     s3_path = game.logger.get_s3_target_path()
 
-    await message.reply("⏳ Выгрузка логов...")
-
-    # Запускаем в отдельном потоке, чтобы не блокировать бота
+    await message.reply("⏳ Выгрузка...")
     await asyncio.to_thread(s3_uploader.upload_session_folder, local_path, s3_path, delete_after=False)
-
     await message.reply(f"✅ Логи выгружены!\nS3: <code>{s3_path}</code>")
 
 
@@ -296,9 +333,11 @@ async def cmd_fake_say(message: Message, command: CommandObject):
     text = command.args
     if not text: return
     active_list = [p for p in game.players if p.is_alive]
-    if hasattr(game, "state") and game.state.phase == "runoff":
+    # Фильтр для бункера
+    if hasattr(game, "state") and hasattr(game.state, "phase") and game.state.phase == "runoff":
         candidates = game.state.shared_data.get("runoff_candidates", [])
         active_list = [p for p in active_list if p.name in candidates]
+
     if hasattr(game, "current_turn_index"):
         idx = game.current_turn_index % len(active_list) if active_list else 0
         current_player = active_list[idx]

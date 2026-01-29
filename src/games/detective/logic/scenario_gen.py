@@ -50,23 +50,30 @@ class ScenarioGenerator:
                 objective = f"ВТОРИЧНАЯ ЦЕЛЬ: {sec_obj['name']} ({sec_obj['desc']})."
             else:
                 role_type = "INNOCENT"
-                objective = "Найти убийцу, но скрыть свои мелкие тайны."
+                objective = "Найти убийцу."
 
             roles_logic.append({
                 "id": i,
                 "type": role_type,
-                "obj": objective
+                "obj": objective,
+                "is_finder": False  # По умолчанию
             })
 
         random.shuffle(roles_logic)
+
+        # Назначаем НАШЕДШЕГО (того, кто нашел тело)
+        # Лучше всего, если это невиновный, но для интриги может быть кто угодно.
+        # Берем первого попавшегося INNOCENT
+        finder = next((r for r in roles_logic if r["type"] == "INNOCENT"), roles_logic[0])
+        finder["is_finder"] = True
+        finder["obj"] += " ТЫ НАШЕЛ ТЕЛО. Опиши этот момент в своей легенде."
 
         killer = next(r for r in roles_logic if r["type"] == "KILLER")
         crime_scene = random.choice(rooms) if rooms else "Кабинет"
 
         alibi_report = []
         alibi_report.append(f"- МЕСТО УБИЙСТВА: {crime_scene}. ВРЕМЯ: ~23:00.")
-        alibi_report.append(
-            f"- УБИЙЦА (Персонаж #{killer['id'] + 1}) был на месте преступления, но скажет, что был в другом месте.")
+        alibi_report.append(f"- УБИЙЦА (Персонаж #{killer['id'] + 1}) был на месте преступления.")
 
         others = [r for r in roles_logic if r["type"] != "KILLER"]
 
@@ -100,7 +107,9 @@ class ScenarioGenerator:
         )
 
         for r in roles_logic:
-            skeleton += f"Персонаж #{r['id'] + 1}: Роль {r['type']}. {r['obj']}\n"
+            role_desc = f"Персонаж #{r['id'] + 1}: Роль {r['type']}."
+            if r['is_finder']: role_desc += " [НАШЕДШИЙ ТЕЛО!]"
+            skeleton += f"{role_desc} {r['obj']}\n"
 
         skeleton += f"\n=== АЛИБИ И СЛЕДЫ (СЛАБЫЕ) ===\n"
         skeleton += "\n".join(alibi_report)
@@ -146,7 +155,6 @@ class ScenarioGenerator:
 
                 required_fields = ["roles", "victim", "solution"]
                 if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
-                    print("⚠️ Шаг 1: Ошибка структуры.")
                     continue
 
                 scenario_data = data
@@ -222,16 +230,13 @@ class ScenarioGenerator:
                                player_names: List[str],
                                timeline_truth: str) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
 
-        # ИСПРАВЛЕНО: Безопасное создание объекта сценария со всеми полями
-        # Если каких-то полей нет в JSON, подставляем дефолтные значения или берем из соседних полей
-
         real_cause = scen_data.get("real_cause")
         if not real_cause:
             real_cause = scen_data.get("cause_of_death", "Неизвестно")
 
         apparent_cause = scen_data.get("apparent_cause")
         if not apparent_cause:
-            apparent_cause = "Остановка сердца"  # Заглушка, если ИИ не придумал
+            apparent_cause = "Остановка сердца"
 
         scenario = DetectiveScenario(
             title=scen_data.get("title", "Дело без названия"),
@@ -239,11 +244,8 @@ class ScenarioGenerator:
             victim_name=scen_data.get("victim", "Неизвестный"),
             time_of_death=scen_data.get("time_of_death", "Неизвестно"),
 
-            # Новые поля
             real_cause=real_cause,
             apparent_cause=apparent_cause,
-
-            # Старое поле для совместимости, если где-то используется
             cause_of_death=real_cause,
 
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
@@ -269,10 +271,11 @@ class ScenarioGenerator:
                 tag=role_json.get("tag", "Гость"),
                 legend=role_json.get("legend", ""),
                 role=role_enum,
-                secret_objective=role_json.get("secret", "")
+                secret_objective=role_json.get("secret", ""),
+                is_finder=role_json.get("is_finder", False)  # <--- Парсим флаг Нашедшего
             )
 
-            # --- ПОИСК ФАКТОВ ---
+            # Факты
             raw_facts = []
             if char_name in facts_map:
                 raw_facts = facts_map[char_name]
@@ -286,11 +289,11 @@ class ScenarioGenerator:
                     raw_facts = facts_map[best_match]
 
             if len(raw_facts) < 5:
-                # Fallback, чтобы не крашить игру
+                # Fallback
                 raw_facts.append({
-                    "text": "Я ничего не видел и не слышал.",
-                    "keyword": "Пусто",
-                    "type": "TESTIMONY"
+                    "text": "Я был в своей комнате и ничего не слышал.",
+                    "keyword": "Тишина",
+                    "type": "ALIBI"
                 })
 
             for f_data in raw_facts[:5]:

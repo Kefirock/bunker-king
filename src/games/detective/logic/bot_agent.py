@@ -37,14 +37,12 @@ class DetectiveBotAgent:
         reaction_instruction = ""
         if history:
             last_msg = history[-1]
-            # Простая проверка на вхождение имени персонажа
             if prof.character_name in last_msg:
-                reaction_instruction = f"ВНИМАНИЕ: В последнем сообщении упомянули твое имя ({prof.character_name}). ТЫ ОБЯЗАН ОТВЕТИТЬ на это обращение (оправдаться или контратаковать)!"
+                reaction_instruction = f"ВНИМАНИЕ: В последнем сообщении упомянули твое имя ({prof.character_name}). ТЫ ОБЯЗАН ОТВЕТИТЬ на это обращение!"
 
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
-        # Используем apparent_cause (видимую причину), чтобы не спойлерить
-        # Если бот - Убийца, он теоретически знает правду, но для отыгрыша лучше пусть видит то же, что и все
+        # Используем видимую причину смерти
         cause_to_show = scenario_data.get("apparent_cause", "Неизвестно")
 
         prompt = prompt_template.format(
@@ -54,15 +52,15 @@ class DetectiveBotAgent:
             legend=prof.legend,
             objective=prof.secret_objective,
 
+            # Флаг нашедшего (влияет на первый ход)
+            is_finder=prof.is_finder,
+
             scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
-
-            # ВАЖНО: Показываем видимую причину
             cause=cause_to_show,
 
             public_facts=pub_str,
             inventory=inv_str,
-            # Добавляем инструкцию реакции в конец истории или отдельным блоком
             history="\n".join(history[-10:]) + "\n" + reaction_instruction,
             published_count=prof.published_facts_count,
             current_round=current_round,

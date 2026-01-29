@@ -72,8 +72,23 @@ class DetectiveGame(GameEngine):
         for p in self.players:
             p.attributes["detective_profile"] = profiles_map.get(p.name, DetectivePlayerProfile())
 
-        roles_log = {p.name: p.attributes["detective_profile"].dict(include={'character_name', 'role'}) for p in
-                     self.players}
+        # --- СОРТИРОВКА: НАШЕДШИЙ ХОДИТ ПЕРВЫМ ---
+        # Ищем игрока с флагом is_finder
+        finder_idx = -1
+        for i, p in enumerate(self.players):
+            if p.attributes["detective_profile"].is_finder:
+                finder_idx = i
+                break
+
+        if finder_idx != -1:
+            # Перемещаем его в начало списка
+            finder = self.players.pop(finder_idx)
+            self.players.insert(0, finder)
+            self.logger.log_event("INIT", f"Finder found: {finder.name}, moved to start.")
+        # ----------------------------------------
+
+        roles_log = {p.name: p.attributes["detective_profile"].dict(include={'character_name', 'role', 'is_finder'}) for
+                     p in self.players}
         self.logger.log_event("ROLES", "Roles assigned", roles_log)
 
         max_rounds = detective_cfg.gameplay.get("setup", {}).get("max_rounds", 3)
@@ -94,13 +109,13 @@ class DetectiveGame(GameEngine):
 
         events = []
 
-        # ВАЖНО: Используем apparent_cause для протокола
+        # ПОЛИЦЕЙСКИЙ ПРОТОКОЛ (Используем apparent_cause и Осмотр тела)
         protocol = (
             f"📄 <b>ПОЛИЦЕЙСКИЙ ПРОТОКОЛ</b>\n\n"
             f"👤 <b>Жертва:</b> {scenario.victim_name}\n"
             f"🕒 <b>Время смерти:</b> {scenario.time_of_death}\n"
             f"📍 <b>Место:</b> {scenario.location_of_body}\n"
-            f"💀 <b>Причина (предварительно):</b> {scenario.apparent_cause}\n"
+            f"💀 <b>Осмотр тела:</b> {scenario.apparent_cause}\n"
         )
         events.append(GameEvent(type="message", content=protocol))
 
@@ -109,7 +124,9 @@ class DetectiveGame(GameEngine):
         char_list = []
         for p in self.players:
             prof = p.attributes["detective_profile"]
-            char_list.append(f"🔹 {prof.character_name} [{prof.tag}]")
+            # Помечаем нашедшего звездочкой (опционально, для удобства)
+            marker = " (Нашел тело)" if prof.is_finder else ""
+            char_list.append(f"🔹 {prof.character_name} [{prof.tag}]{marker}")
 
         events.append(GameEvent(type="message", content=f"👥 <b>ПОДОЗРЕВАЕМЫЕ:</b>\n" + "\n".join(char_list)))
         events.append(GameEvent(type="message",
@@ -127,6 +144,7 @@ class DetectiveGame(GameEngine):
 
         events = []
 
+        # Смена раунда
         if self.current_turn_index >= len(self.players):
             self.current_turn_index = 0
             self.state.shared_data["current_round"] += 1
@@ -159,6 +177,7 @@ class DetectiveGame(GameEngine):
 
         self.logger.log_event("TURN", f"Current turn: {current_player.name} ({display_name})")
 
+        # ХОД БОТА
         if not current_player.is_human:
             t_count = self.state.shared_data["turn_count"]
             msg_token = f"turn_{t_count}_{current_player.id}"
@@ -169,6 +188,7 @@ class DetectiveGame(GameEngine):
             events.append(GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id}))
             return events
 
+        # ХОД ЧЕЛОВЕКА
         else:
             msg = "👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат."
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
@@ -217,9 +237,9 @@ class DetectiveGame(GameEngine):
             events.extend(reveal_events)
 
         prof = bot.attributes["detective_profile"]
-        display_name = f"{prof.character_name} [{prof.tag}]"
+        display_name = f"{prof.character_name}"
 
-        self.state.history.append(f"[{prof.character_name}]: {speech}")
+        self.state.history.append(f"[{display_name}]: {speech}")
 
         final_msg = f"<b>{display_name}</b>:\n{speech}"
         events.append(GameEvent(type="edit_message", content=final_msg, token=token))
@@ -246,10 +266,11 @@ class DetectiveGame(GameEngine):
         self.logger.log_event("CHAT", f"{p.name} -> {text}")
 
         my_prof = p.attributes["detective_profile"]
+        my_display = f"{my_prof.character_name} [{my_prof.tag}]"
 
         self.state.history.append(f"[{my_prof.character_name}]: {text}")
 
-        msg = f"<b>{my_prof.character_name} [{my_prof.tag}]</b>: {text}"
+        msg = f"<b>{my_display}</b>: {text}"
         others = [x.id for x in self.players if x.id != player_id]
         events = [GameEvent(type="message", target_ids=others, content=msg)]
 
@@ -459,8 +480,8 @@ class DetectiveGame(GameEngine):
         else:
             report += "💀 <b>ПОБЕДА УБИЙЦЫ!</b> Вы обвинили невиновного."
 
-        # ВАЖНО: Раскрываем настоящую причину смерти и разгадку
-        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n<i>{scen_data['true_solution']}</i>\n\n💀 <b>Причина смерти:</b> {scen_data['cause_of_death']}"
+        # Раскрываем истинную причину смерти
+        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n{scen_data['true_solution']}\n\n💀 <b>ИСТИННАЯ ПРИЧИНА СМЕРТИ:</b> {scen_data.get('real_cause', 'Неизвестно')}"
 
         events.append(GameEvent(type="game_over", content=report))
         return events

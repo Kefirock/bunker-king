@@ -47,7 +47,13 @@ class DetectivePlayerProfile(BaseModel):
     archetype: str = "Обыватель"
     legend: str = ""
     role: RoleType = RoleType.INNOCENT
+
+    # НОВЫЕ ПОЛЯ
+    is_finder: bool = False  # Тот, кто нашел тело (ходит первым)
     secret_objective: str = ""
+    assigned_marker: str = ""
+    starting_location: str = ""
+
     inventory: List[str] = Field(default_factory=list)
     published_facts_count: int = 0
     last_suggestions: Optional[SuggestionData] = None
@@ -57,20 +63,17 @@ class DetectiveScenario(BaseModel):
     title: str
     description: str
 
-    # Полицейский протокол
     victim_name: str
     time_of_death: str
 
-    # НОВОЕ: Разделение причин
-    apparent_cause: str  # То, что видят все (напр. "Сердечный приступ")
-    real_cause: str  # То, что выяснится в конце (напр. "Яд")
+    apparent_cause: str
+    real_cause: str
 
     location_of_body: str
 
     murder_method: str
     true_solution: str
 
-    # Структурные данные
     timeline_truth: str = ""
 
     all_facts: Dict[str, Fact] = Field(default_factory=dict)

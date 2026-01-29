@@ -11,10 +11,13 @@ class NarratorAgent:
 
         prompt_template = detective_cfg.prompts["narrator"]["system"]
 
+        # Используем видимую причину
+        cause_to_show = scenario_data.get("apparent_cause", "Неизвестно")
+
         prompt = prompt_template.format(
             title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
-            cause=scenario_data.get("cause_of_death", "Неизвестно"),
+            cause=cause_to_show,
 
             history="\n".join(history[-5:]),
             current_round=current_round,
@@ -27,7 +30,7 @@ class NarratorAgent:
             response = await llm_client.generate(
                 model_config=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.8,  # Чуть снизили для стабильности
+                temperature=0.7,  # Снижена температура для реализма
                 logger=logger
             )
 

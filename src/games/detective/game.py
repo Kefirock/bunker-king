@@ -33,7 +33,7 @@ class DetectiveGame(GameEngine):
         self.logger.log_event("INIT_START", f"Init for {len(users_data)} users")
         names = [u["name"] for u in users_data]
 
-        # 1. Генерация сценария (Сюжет + Роли)
+        # 1. Генерация сценария
         try:
             scenario, profiles_map = await self.scenario_gen.generate(names, logger=self.logger)
         except ScenarioGenerationError as e:
@@ -94,13 +94,13 @@ class DetectiveGame(GameEngine):
 
         events = []
 
-        # ПОЛИЦЕЙСКИЙ ПРОТОКОЛ (Используем новые поля из процедурного сценария)
+        # ВАЖНО: Используем apparent_cause для протокола
         protocol = (
             f"📄 <b>ПОЛИЦЕЙСКИЙ ПРОТОКОЛ</b>\n\n"
             f"👤 <b>Жертва:</b> {scenario.victim_name}\n"
             f"🕒 <b>Время смерти:</b> {scenario.time_of_death}\n"
             f"📍 <b>Место:</b> {scenario.location_of_body}\n"
-            f"💀 <b>Причина:</b> {scenario.cause_of_death}\n"
+            f"💀 <b>Причина (предварительно):</b> {scenario.apparent_cause}\n"
         )
         events.append(GameEvent(type="message", content=protocol))
 
@@ -127,7 +127,6 @@ class DetectiveGame(GameEngine):
 
         events = []
 
-        # Смена раунда
         if self.current_turn_index >= len(self.players):
             self.current_turn_index = 0
             self.state.shared_data["current_round"] += 1
@@ -142,7 +141,6 @@ class DetectiveGame(GameEngine):
 
             events.append(GameEvent(type="message", content=f"🔔 <b>Раунд {cur_round}/{max_round}</b>"))
 
-            # Нарратор
             if len(self.state.history) > 3:
                 scen_data = self.state.shared_data["scenario"]
                 narrative = await self.narrator_agent.narrate(
@@ -161,7 +159,6 @@ class DetectiveGame(GameEngine):
 
         self.logger.log_event("TURN", f"Current turn: {current_player.name} ({display_name})")
 
-        # ХОД БОТА
         if not current_player.is_human:
             t_count = self.state.shared_data["turn_count"]
             msg_token = f"turn_{t_count}_{current_player.id}"
@@ -172,7 +169,6 @@ class DetectiveGame(GameEngine):
             events.append(GameEvent(type="bot_think", token=msg_token, extra_data={"bot_id": current_player.id}))
             return events
 
-        # ХОД ЧЕЛОВЕКА
         else:
             msg = "👉 <b>ВАШ ХОД!</b>\nНапишите сообщение в чат."
             events.append(GameEvent(type="message", target_ids=[current_player.id], content=msg))
@@ -221,9 +217,9 @@ class DetectiveGame(GameEngine):
             events.extend(reveal_events)
 
         prof = bot.attributes["detective_profile"]
-        display_name = f"{prof.character_name}"
+        display_name = f"{prof.character_name} [{prof.tag}]"
 
-        self.state.history.append(f"[{display_name}]: {speech}")
+        self.state.history.append(f"[{prof.character_name}]: {speech}")
 
         final_msg = f"<b>{display_name}</b>:\n{speech}"
         events.append(GameEvent(type="edit_message", content=final_msg, token=token))
@@ -250,11 +246,10 @@ class DetectiveGame(GameEngine):
         self.logger.log_event("CHAT", f"{p.name} -> {text}")
 
         my_prof = p.attributes["detective_profile"]
-        my_display = f"{my_prof.character_name} [{my_prof.tag}]"
 
         self.state.history.append(f"[{my_prof.character_name}]: {text}")
 
-        msg = f"<b>{my_display}</b>: {text}"
+        msg = f"<b>{my_prof.character_name} [{my_prof.tag}]</b>: {text}"
         others = [x.id for x in self.players if x.id != player_id]
         events = [GameEvent(type="message", target_ids=others, content=msg)]
 
@@ -464,7 +459,9 @@ class DetectiveGame(GameEngine):
         else:
             report += "💀 <b>ПОБЕДА УБИЙЦЫ!</b> Вы обвинили невиновного."
 
-        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n{scen_data['true_solution']}"
+        # ВАЖНО: Раскрываем настоящую причину смерти и разгадку
+        report += f"\n\n📜 <b>РАЗГАДКА:</b>\n<i>{scen_data['true_solution']}</i>\n\n💀 <b>Причина смерти:</b> {scen_data['cause_of_death']}"
+
         events.append(GameEvent(type="game_over", content=report))
         return events
 

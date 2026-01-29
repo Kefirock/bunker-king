@@ -28,13 +28,16 @@ class SuggestionAgent:
 
         prompt_template = detective_cfg.prompts["suggestion"]["system"]
 
-        # ВАЖНО: Передаем tag в промпт
+        # Используем видимую причину смерти
+        cause_to_show = scenario_data.get("apparent_cause", "Неизвестно")
+
         prompt = prompt_template.format(
             character_name=prof.character_name,
-            tag=prof.tag,  # <--- ВОТ ЭТА СТРОКА ОБЯЗАТЕЛЬНА
+            tag=prof.tag,
             legend=prof.legend,
 
             victim=scenario_data.get("victim_name", "Неизвестный"),
+            cause=cause_to_show,
 
             public_facts=pub_txt,
             private_facts=priv_txt,

@@ -32,23 +32,38 @@ class DetectiveBotAgent:
 
         inv_str = "\n".join(inv_lines) if inv_lines else "Пусто"
 
+        # --- РЕАКТИВНОСТЬ ---
+        # Проверяем, упоминали ли нас в последнем сообщении
+        reaction_instruction = ""
+        if history:
+            last_msg = history[-1]
+            # Простая проверка на вхождение имени персонажа
+            if prof.character_name in last_msg:
+                reaction_instruction = f"ВНИМАНИЕ: В последнем сообщении упомянули твое имя ({prof.character_name}). ТЫ ОБЯЗАН ОТВЕТИТЬ на это обращение (оправдаться или контратаковать)!"
+
         prompt_template = detective_cfg.prompts["bot_player"]["main"]
 
-        # ВАЖНО: Передаем tag в промпт
+        # Используем apparent_cause (видимую причину), чтобы не спойлерить
+        # Если бот - Убийца, он теоретически знает правду, но для отыгрыша лучше пусть видит то же, что и все
+        cause_to_show = scenario_data.get("apparent_cause", "Неизвестно")
+
         prompt = prompt_template.format(
             name=bot.name,
-            tag=prof.tag,  # <--- ВОТ ЭТА СТРОКА ОБЯЗАТЕЛЬНА
+            tag=prof.tag,
             character_name=prof.character_name,
             legend=prof.legend,
             objective=prof.secret_objective,
 
             scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
-            cause=scenario_data.get("cause_of_death", "Неизвестно"),
+
+            # ВАЖНО: Показываем видимую причину
+            cause=cause_to_show,
 
             public_facts=pub_str,
             inventory=inv_str,
-            history="\n".join(history[-10:]),
+            # Добавляем инструкцию реакции в конец истории или отдельным блоком
+            history="\n".join(history[-10:]) + "\n" + reaction_instruction,
             published_count=prof.published_facts_count,
             current_round=current_round,
             max_rounds=max_rounds
@@ -88,17 +103,22 @@ class DetectiveBotAgent:
 
         prof: DetectivePlayerProfile = bot.attributes.get("detective_profile")
 
+        # Исключаем себя
+        valid_candidates = [p for p in candidates if p.id != bot.id]
+        if not valid_candidates:
+            return bot.attributes['detective_profile'].character_name
+
         if prof.role == RoleType.KILLER:
-            others = [p for p in candidates if p.id != bot.id]
-            target = random.choice(others).name if others else candidates[0].name
-            if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target}")
-            return target
+            target = random.choice(valid_candidates)
+            target_char = target.attributes['detective_profile'].character_name
+            if logger: logger.log_event("BOT_VOTE", f"{bot.name} (KILLER) auto-voted against {target_char}")
+            return target_char
 
         pub_str = "; ".join([f"{f.text}" for f in public_facts])
 
         cand_str = ", ".join([
             f"{p.attributes['detective_profile'].character_name}"
-            for p in candidates
+            for p in valid_candidates
         ])
 
         prompt_template = detective_cfg.prompts["bot_player"]["vote"]
@@ -126,11 +146,11 @@ class DetectiveBotAgent:
 
             if logger: logger.log_event("BOT_VOTE_DECISION", f"{bot.name} voted against char {target_char}")
 
-            if any(p.attributes['detective_profile'].character_name == target_char for p in candidates):
+            if any(p.attributes['detective_profile'].character_name == target_char for p in valid_candidates):
                 return target_char
 
-            return random.choice(candidates).attributes['detective_profile'].character_name
+            return random.choice(valid_candidates).attributes['detective_profile'].character_name
 
         except Exception as e:
             if logger: logger.log_event("BOT_VOTE_ERROR", str(e))
-            return random.choice(candidates).attributes['detective_profile'].character_name
+            return random.choice(valid_candidates).attributes['detective_profile'].character_name

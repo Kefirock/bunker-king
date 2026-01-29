@@ -14,12 +14,8 @@ class ScenarioGenerationError(Exception):
 
 class ScenarioGenerator:
     def _build_advanced_skeleton(self, player_count: int) -> str:
-        """
-        Создает жесткий процедурный каркас сценария.
-        """
         mod = detective_cfg.modules
 
-        # Fallback на случай проблем с конфигом
         if not mod or "locations" not in mod:
             print("⚠️ WARNING: 'modules.yaml' issue. Using defaults.")
             mod = {
@@ -30,7 +26,6 @@ class ScenarioGenerator:
                 "secondary_objectives": [{"name": "Вор", "desc": "Украл"}]
             }
 
-        # 1. ФИЗИКА МИРА
         tech = random.choice(mod.get("tech_levels", [{"name": "1920s"}]))
 
         settings_keys = list(mod.get("locations", {}).keys())
@@ -43,7 +38,6 @@ class ScenarioGenerator:
         victim = random.choice(mod.get("victims", ["Жертва"]))
         method = random.choice(mod.get("methods", ["Удар"]))
 
-        # 2. РАСПРЕДЕЛЕНИЕ РОЛЕЙ
         roles_logic = []
         for i in range(player_count):
             if i == 0:
@@ -66,7 +60,6 @@ class ScenarioGenerator:
 
         random.shuffle(roles_logic)
 
-        # 3. АЛИБИ-МАТРИЦА (РАЗМЫТАЯ)
         killer = next(r for r in roles_logic if r["type"] == "KILLER")
         crime_scene = random.choice(rooms) if rooms else "Кабинет"
 
@@ -77,15 +70,11 @@ class ScenarioGenerator:
 
         others = [r for r in roles_logic if r["type"] != "KILLER"]
 
-        # ВАЖНО: Никаких пар. Все по одному или "видели издалека".
-        # Это создает слабые алиби.
         for p in others:
-            # Выбираем комнату, отличную от места убийства
             safe_rooms = [r for r in rooms if r != crime_scene]
             solo_room = random.choice(safe_rooms) if safe_rooms else "Коридор"
             alibi_report.append(f"- Персонаж #{p['id'] + 1} был ОДИН в локации '{solo_room}'. Алиби не подтверждено.")
 
-        # 4. МАРКЕРЫ (НЕОДНОЗНАЧНЫЕ)
         markers_report = []
         k_marker = random.choice(mod.get("markers", [{"text": "Нервозность", "implication": "Страх"}]))
         markers_report.append(f"- УБИЙЦА имеет след: {k_marker['text']} ({k_marker['implication']}).")
@@ -96,7 +85,6 @@ class ScenarioGenerator:
             markers_report.append(
                 f"- ПОДОЗРЕВАЕМЫЙ (Персонаж #{innocent_suspect['id'] + 1}) имеет след: {i_marker['text']} (Ложный след).")
 
-        # СБОРКА
         skeleton = (
             f"=== ФИЗИКА МИРА ===\n"
             f"ЭПОХА: {tech.get('name', '20s')}\n"
@@ -156,6 +144,7 @@ class ScenarioGenerator:
                 )
                 data = llm_client.parse_json(response)
 
+                # Валидация (добавлено apparent_cause и real_cause)
                 required_fields = ["roles", "victim", "solution"]
                 if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
                     print("⚠️ Шаг 1: Ошибка структуры.")
@@ -187,7 +176,9 @@ class ScenarioGenerator:
 
         facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
             victim=scenario_data.get("victim"),
-            cause=scenario_data.get("cause_of_death"),
+            # Передаем обе причины
+            cause=scenario_data.get("real_cause", "Неизвестно"),
+            apparent_cause=scenario_data.get("apparent_cause", "Неизвестно"),
             location=scenario_data.get("location_of_body"),
             solution=scenario_data.get("solution"),
             timeline=timeline_info,
@@ -239,7 +230,11 @@ class ScenarioGenerator:
             description=scen_data.get("description", "..."),
             victim_name=scen_data.get("victim", "Неизвестный"),
             time_of_death=scen_data.get("time_of_death", "Неизвестно"),
-            cause_of_death=scen_data.get("cause_of_death", "Неизвестно"),
+
+            # Новые поля
+            cause_of_death=scen_data.get("real_cause", "Неизвестно"),  # Внутренняя истина
+            apparent_cause=scen_data.get("apparent_cause", "Неизвестно"),  # Для протокола
+
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
             murder_method=scen_data.get("method", "Unknown"),
             true_solution=scen_data.get("solution", "Unknown"),
@@ -266,7 +261,6 @@ class ScenarioGenerator:
                 secret_objective=role_json.get("secret", "")
             )
 
-            # --- ПОИСК ФАКТОВ ---
             raw_facts = []
             if char_name in facts_map:
                 raw_facts = facts_map[char_name]
@@ -280,12 +274,8 @@ class ScenarioGenerator:
                     raw_facts = facts_map[best_match]
 
             if len(raw_facts) < 5:
-                # Fallback для стабильности, если нейросеть сгенерировала мало фактов
-                raw_facts.append({
-                    "text": "Я был в своей комнате и ничего не слышал. Это все, что я знаю.",
-                    "keyword": "Тишина",
-                    "type": "ALIBI"
-                })
+                raise ScenarioGenerationError(
+                    f"Нейросеть не сгенерировала достаточно улик для {char_name}. Попробуйте снова.")
 
             for f_data in raw_facts[:5]:
                 fid = str(uuid.uuid4())[:8]

@@ -14,8 +14,12 @@ class ScenarioGenerationError(Exception):
 
 class ScenarioGenerator:
     def _build_advanced_skeleton(self, player_count: int) -> str:
+        """
+        Создает жесткий процедурный каркас сценария.
+        """
         mod = detective_cfg.modules
 
+        # Fallback
         if not mod or "locations" not in mod:
             print("⚠️ WARNING: 'modules.yaml' issue. Using defaults.")
             mod = {
@@ -26,6 +30,7 @@ class ScenarioGenerator:
                 "secondary_objectives": [{"name": "Вор", "desc": "Украл"}]
             }
 
+        # 1. ФИЗИКА МИРА
         tech = random.choice(mod.get("tech_levels", [{"name": "1920s"}]))
 
         settings_keys = list(mod.get("locations", {}).keys())
@@ -38,50 +43,62 @@ class ScenarioGenerator:
         victim = random.choice(mod.get("victims", ["Жертва"]))
         method = random.choice(mod.get("methods", ["Удар"]))
 
+        # 2. РАСПРЕДЕЛЕНИЕ РОЛЕЙ
         roles_logic = []
         for i in range(player_count):
             if i == 0:
                 role_type = "KILLER"
-                objective = "Скрыть преступление, путать следы."
+                # Явно указываем, что нужна маскировка
+                objective = "Внутренняя роль: УБИЙЦА. Публичная маска: Придумай мирную профессию (Врач, Гость, и т.д.). Цель: Скрыть преступление."
             elif i == 1:
                 role_type = "INNOCENT"
                 sec_obj = random.choice(
                     mod.get("secondary_objectives", [{"name": "Свидетель", "desc": "Видел лишнее"}]))
-                objective = f"ВТОРИЧНАЯ ЦЕЛЬ: {sec_obj['name']} ({sec_obj['desc']})."
+                objective = f"ВТОРИЧНАЯ ЦЕЛЬ: {sec_obj['name']} ({sec_obj['desc']}). Вести себя подозрительно, но не из-за убийства."
             else:
                 role_type = "INNOCENT"
-                objective = "Найти убийцу."
+                objective = "Найти убийцу, но скрыть свои мелкие тайны."
 
             roles_logic.append({
                 "id": i,
                 "type": role_type,
-                "obj": objective,
-                "is_finder": False  # По умолчанию
+                "obj": objective
             })
 
         random.shuffle(roles_logic)
 
-        # Назначаем НАШЕДШЕГО (того, кто нашел тело)
-        # Лучше всего, если это невиновный, но для интриги может быть кто угодно.
-        # Берем первого попавшегося INNOCENT
-        finder = next((r for r in roles_logic if r["type"] == "INNOCENT"), roles_logic[0])
-        finder["is_finder"] = True
-        finder["obj"] += " ТЫ НАШЕЛ ТЕЛО. Опиши этот момент в своей легенде."
+        # Назначаем НАШЕДШЕГО (Finder)
+        # Ищем первого невиновного для этой роли
+        finder_found = False
+        for r in roles_logic:
+            if r["type"] == "INNOCENT":
+                r["is_finder"] = True
+                r["obj"] += " ВАЖНО: ТЫ НАШЕЛ ТЕЛО. Опиши этот момент в своей легенде."
+                finder_found = True
+                break
 
+        # Если вдруг все киллеры (невозможно, но для safety), назначаем первого
+        if not finder_found:
+            roles_logic[0]["is_finder"] = True
+
+        # 3. АЛИБИ-МАТРИЦА
         killer = next(r for r in roles_logic if r["type"] == "KILLER")
         crime_scene = random.choice(rooms) if rooms else "Кабинет"
 
         alibi_report = []
         alibi_report.append(f"- МЕСТО УБИЙСТВА: {crime_scene}. ВРЕМЯ: ~23:00.")
-        alibi_report.append(f"- УБИЙЦА (Персонаж #{killer['id'] + 1}) был на месте преступления.")
+        alibi_report.append(
+            f"- УБИЙЦА (Персонаж #{killer['id'] + 1}) был на месте преступления. Должен придумать ложное алиби.")
 
         others = [r for r in roles_logic if r["type"] != "KILLER"]
 
         for p in others:
             safe_rooms = [r for r in rooms if r != crime_scene]
             solo_room = random.choice(safe_rooms) if safe_rooms else "Коридор"
-            alibi_report.append(f"- Персонаж #{p['id'] + 1} был ОДИН в локации '{solo_room}'. Алиби не подтверждено.")
+            alibi_report.append(
+                f"- Персонаж #{p['id'] + 1} был ОДИН в локации '{solo_room}'. Алиби слабое/неподтвержденное.")
 
+        # 4. МАРКЕРЫ
         markers_report = []
         k_marker = random.choice(mod.get("markers", [{"text": "Нервозность", "implication": "Страх"}]))
         markers_report.append(f"- УБИЙЦА имеет след: {k_marker['text']} ({k_marker['implication']}).")
@@ -92,6 +109,7 @@ class ScenarioGenerator:
             markers_report.append(
                 f"- ПОДОЗРЕВАЕМЫЙ (Персонаж #{innocent_suspect['id'] + 1}) имеет след: {i_marker['text']} (Ложный след).")
 
+        # СБОРКА
         skeleton = (
             f"=== ФИЗИКА МИРА ===\n"
             f"ЭПОХА: {tech.get('name', '20s')}\n"
@@ -103,12 +121,11 @@ class ScenarioGenerator:
             f"СПОСОБ: {method}\n"
             f"ЛОКАЦИЯ ТЕЛА: {crime_scene}\n\n"
 
-            f"=== РОЛИ И ЦЕЛИ ===\n"
+            f"=== РОЛИ И ЦЕЛИ (ДЛЯ ГЕНЕРАЦИИ) ===\n"
         )
 
         for r in roles_logic:
             role_desc = f"Персонаж #{r['id'] + 1}: Роль {r['type']}."
-            if r['is_finder']: role_desc += " [НАШЕДШИЙ ТЕЛО!]"
             skeleton += f"{role_desc} {r['obj']}\n"
 
         skeleton += f"\n=== АЛИБИ И СЛЕДЫ (СЛАБЫЕ) ===\n"
@@ -155,6 +172,7 @@ class ScenarioGenerator:
 
                 required_fields = ["roles", "victim", "solution"]
                 if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
+                    print("⚠️ Шаг 1: Ошибка структуры.")
                     continue
 
                 scenario_data = data
@@ -171,9 +189,17 @@ class ScenarioGenerator:
         expected_chars = []
         for r in scenario_data["roles"]:
             char_name = r.get('character_name', 'Unknown')
+            tag = r.get('tag', 'Гость')
+
+            # SAFETY FILTER: Убираем спойлеры из тегов
+            forbidden_tags = ["KILLER", "MURDERER", "УБИЙЦА", "LOVER", "ЛЮБОВНИК", "THIEF", "ВОР"]
+            if any(bad in tag.upper() for bad in forbidden_tags):
+                tag = "Гость"
+                r["tag"] = tag  # Обновляем в данных
+
             expected_chars.append(char_name)
             roles_desc.append(
-                f"- Имя: {char_name} ({r.get('tag')})\n"
+                f"- Имя: {char_name} ({tag})\n"
                 f"  Роль: {r.get('role')}\n"
                 f"  Легенда: {r.get('legend')}\n"
                 f"  Секрет: {r.get('secret')}"
@@ -183,7 +209,8 @@ class ScenarioGenerator:
 
         facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
             victim=scenario_data.get("victim"),
-            cause=scenario_data.get("cause_of_death"),
+            # Берем истинную причину для генератора фактов, чтобы он мог создавать улики
+            cause=scenario_data.get("cause_of_death", "Неизвестно"),
             location=scenario_data.get("location_of_body"),
             solution=scenario_data.get("solution"),
             timeline=timeline_info,
@@ -230,13 +257,16 @@ class ScenarioGenerator:
                                player_names: List[str],
                                timeline_truth: str) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
 
+        # Извлекаем причины смерти
         real_cause = scen_data.get("real_cause")
         if not real_cause:
+            # Если LLM забыла real_cause, берем cause_of_death
             real_cause = scen_data.get("cause_of_death", "Неизвестно")
 
         apparent_cause = scen_data.get("apparent_cause")
         if not apparent_cause:
-            apparent_cause = "Остановка сердца"
+            # Если нет видимой причины, генерируем заглушку на основе реальной
+            apparent_cause = "Остановка сердца (причина неясна)"
 
         scenario = DetectiveScenario(
             title=scen_data.get("title", "Дело без названия"),
@@ -246,6 +276,8 @@ class ScenarioGenerator:
 
             real_cause=real_cause,
             apparent_cause=apparent_cause,
+
+            # Для обратной совместимости
             cause_of_death=real_cause,
 
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
@@ -266,16 +298,19 @@ class ScenarioGenerator:
             r_str = str(role_json.get("role", "INNOCENT")).upper()
             role_enum = RoleType.KILLER if "KILLER" in r_str else RoleType.INNOCENT
 
+            # Используем очищенный тег из JSON или дефолтный
+            tag = role_json.get("tag", "Гость")
+
             profile = DetectivePlayerProfile(
                 character_name=char_name,
-                tag=role_json.get("tag", "Гость"),
+                tag=tag,
                 legend=role_json.get("legend", ""),
                 role=role_enum,
                 secret_objective=role_json.get("secret", ""),
-                is_finder=role_json.get("is_finder", False)  # <--- Парсим флаг Нашедшего
+                is_finder=role_json.get("is_finder", False)
             )
 
-            # Факты
+            # --- ПОИСК ФАКТОВ ---
             raw_facts = []
             if char_name in facts_map:
                 raw_facts = facts_map[char_name]
@@ -289,12 +324,7 @@ class ScenarioGenerator:
                     raw_facts = facts_map[best_match]
 
             if len(raw_facts) < 5:
-                # Fallback
-                raw_facts.append({
-                    "text": "Я был в своей комнате и ничего не слышал.",
-                    "keyword": "Тишина",
-                    "type": "ALIBI"
-                })
+                raise ScenarioGenerationError(f"Нейросеть не сгенерировала достаточно улик для {char_name}.")
 
             for f_data in raw_facts[:5]:
                 fid = str(uuid.uuid4())[:8]

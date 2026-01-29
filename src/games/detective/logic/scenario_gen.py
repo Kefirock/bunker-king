@@ -144,7 +144,6 @@ class ScenarioGenerator:
                 )
                 data = llm_client.parse_json(response)
 
-                # Валидация (добавлено apparent_cause и real_cause)
                 required_fields = ["roles", "victim", "solution"]
                 if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
                     print("⚠️ Шаг 1: Ошибка структуры.")
@@ -176,9 +175,7 @@ class ScenarioGenerator:
 
         facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
             victim=scenario_data.get("victim"),
-            # Передаем обе причины
-            cause=scenario_data.get("real_cause", "Неизвестно"),
-            apparent_cause=scenario_data.get("apparent_cause", "Неизвестно"),
+            cause=scenario_data.get("cause_of_death"),
             location=scenario_data.get("location_of_body"),
             solution=scenario_data.get("solution"),
             timeline=timeline_info,
@@ -225,6 +222,17 @@ class ScenarioGenerator:
                                player_names: List[str],
                                timeline_truth: str) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
 
+        # ИСПРАВЛЕНО: Безопасное создание объекта сценария со всеми полями
+        # Если каких-то полей нет в JSON, подставляем дефолтные значения или берем из соседних полей
+
+        real_cause = scen_data.get("real_cause")
+        if not real_cause:
+            real_cause = scen_data.get("cause_of_death", "Неизвестно")
+
+        apparent_cause = scen_data.get("apparent_cause")
+        if not apparent_cause:
+            apparent_cause = "Остановка сердца"  # Заглушка, если ИИ не придумал
+
         scenario = DetectiveScenario(
             title=scen_data.get("title", "Дело без названия"),
             description=scen_data.get("description", "..."),
@@ -232,8 +240,11 @@ class ScenarioGenerator:
             time_of_death=scen_data.get("time_of_death", "Неизвестно"),
 
             # Новые поля
-            cause_of_death=scen_data.get("real_cause", "Неизвестно"),  # Внутренняя истина
-            apparent_cause=scen_data.get("apparent_cause", "Неизвестно"),  # Для протокола
+            real_cause=real_cause,
+            apparent_cause=apparent_cause,
+
+            # Старое поле для совместимости, если где-то используется
+            cause_of_death=real_cause,
 
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
             murder_method=scen_data.get("method", "Unknown"),
@@ -261,6 +272,7 @@ class ScenarioGenerator:
                 secret_objective=role_json.get("secret", "")
             )
 
+            # --- ПОИСК ФАКТОВ ---
             raw_facts = []
             if char_name in facts_map:
                 raw_facts = facts_map[char_name]
@@ -274,8 +286,12 @@ class ScenarioGenerator:
                     raw_facts = facts_map[best_match]
 
             if len(raw_facts) < 5:
-                raise ScenarioGenerationError(
-                    f"Нейросеть не сгенерировала достаточно улик для {char_name}. Попробуйте снова.")
+                # Fallback, чтобы не крашить игру
+                raw_facts.append({
+                    "text": "Я ничего не видел и не слышал.",
+                    "keyword": "Пусто",
+                    "type": "TESTIMONY"
+                })
 
             for f_data in raw_facts[:5]:
                 fid = str(uuid.uuid4())[:8]

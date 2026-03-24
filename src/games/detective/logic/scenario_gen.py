@@ -283,8 +283,22 @@ class ScenarioGenerator:
             location_of_body=scen_data.get("location_of_body", "Неизвестно"),
             murder_method=scen_data.get("method", "Unknown"),
             true_solution=scen_data.get("solution", "Unknown"),
-            timeline_truth=timeline_truth
+            timeline_truth=timeline_truth,
+            fact_graph=[]  # Будет заполнено после генерации противоречий
         )
+        
+        # Генерация противоречий после создания фактов
+        scenario.fact_graph = self._generate_fact_contractions(scenario.all_facts)
+        
+        # Сохранение ложных следов
+        red_herrings_data = scen_data.get("red_herrings", [])
+        for rh in red_herrings_data:
+            from src.games.detective.schemas import RedHerring
+            scenario.red_herrings.append(RedHerring(
+                character_name=rh.get("character_name", ""),
+                suspicious_secret=rh.get("suspicious_secret", ""),
+                actual_truth=rh.get("actual_truth", "")
+            ))
 
         player_profiles: Dict[str, DetectivePlayerProfile] = {}
         roles_data = scen_data.get("roles", [])
@@ -355,3 +369,77 @@ class ScenarioGenerator:
             player_profiles[real_name] = profile
 
         return scenario, player_profiles
+
+    def _generate_fact_contractions(self, all_facts: Dict[str, Fact]) -> List:
+        """Генерация противоречий между фактами на основе анализа текста"""
+        from src.games.detective.schemas import FactConnection
+        
+        facts_list = list(all_facts.values())
+        if len(facts_list) < 4:
+            return []
+        
+        # Простая эвристика: ищем факты с противоположными утверждениями
+        # Ключевые слова для поиска противоречий
+        contradiction_pairs = []
+        
+        # Словари для поиска противоречий
+        time_mentions = {}  # время -> [fact_ids]
+        location_mentions = {}  # место -> [fact_ids]
+        
+        time_words = ["23:00", "22:00", "21:00", "полночь", "вечер", "ночь", "утро"]
+        location_words = ["кухня", "сад", "кабинет", "спальня", "холл", "гостиная"]
+        
+        for fact in facts_list:
+            text_lower = fact.text.lower()
+            
+            # Ищем упоминания времени
+            for tw in time_words:
+                if tw in text_lower:
+                    time_mentions.setdefault(tw, []).append(fact.id)
+            
+            # Ищем упоминания мест
+            for lw in location_words:
+                if lw in text_lower:
+                    location_mentions.setdefault(lw, []).append(fact.id)
+        
+        # Создаём противоречия для мест/времени с несколькими упоминаниями
+        for time_val, fact_ids in time_mentions.items():
+            if len(fact_ids) >= 2:
+                # Берём первые два факта о этом времени
+                contradiction_pairs.append((
+                    fact_ids[0],
+                    fact_ids[1],
+                    f"Оба факта о {time_val}, но могут противоречить в деталях"
+                ))
+        
+        for loc_val, fact_ids in location_mentions.items():
+            if len(fact_ids) >= 2 and len(contradiction_pairs) < 3:
+                contradiction_pairs.append((
+                    fact_ids[0],
+                    fact_ids[1],
+                    f"Оба факта о '{loc_val}', но могут противоречить в деталях"
+                ))
+        
+        # Если не нашли достаточно противоречий, добавляем случайные пары
+        import random
+        while len(contradiction_pairs) < 2 and len(facts_list) >= 4:
+            f1, f2 = random.sample(facts_list, 2)
+            if f1.id != f2.id and (f1.id, f2.id) not in [(p[0], p[1]) for p in contradiction_pairs]:
+                contradiction_pairs.append((
+                    f1.id,
+                    f2.id,
+                    "Факты могут противоречить в контексте расследования"
+                ))
+        
+        # Преобразуем в FactConnection
+        contradictions = []
+        for f1_id, f2_id, reason in contradiction_pairs[:4]:  # Максимум 4 противоречия
+            conn = FactConnection(
+                from_fact=f1_id,
+                to_fact=f2_id,
+                connection_type="CONTRADICTS",
+                reason=reason
+            )
+            contradictions.append(conn)
+        
+        return contradictions

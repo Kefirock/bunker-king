@@ -7,7 +7,7 @@ from src.core.schemas import BasePlayer, BaseGameState, GameEvent
 from src.core.logger import SessionLogger
 
 from src.games.detective.schemas import DetectiveStateData, DetectiveScenario, DetectivePlayerProfile, GamePhase, Fact, \
-    RoleType
+    RoleType, BotState
 from src.games.detective.logic.scenario_gen import ScenarioGenerator, ScenarioGenerationError
 from src.games.detective.logic.suggestion_agent import SuggestionAgent
 from src.games.detective.logic.bot_agent import DetectiveBotAgent
@@ -71,6 +71,12 @@ class DetectiveGame(GameEngine):
 
         for p in self.players:
             p.attributes["detective_profile"] = profiles_map.get(p.name, DetectivePlayerProfile())
+        
+        # Инициализация bot_state для ботов
+        for p in self.players:
+            if not p.is_human:
+                prof = p.attributes["detective_profile"]
+                prof.bot_state = BotState()
 
         # Сортировка: Нашедший (Finder) ходит первым
         finder_idx = -1

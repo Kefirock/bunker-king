@@ -35,10 +35,42 @@ class Fact(BaseModel):
     source_player_id: Optional[int] = None
 
 
+class FactConnection(BaseModel):
+    """Связь между двумя фактами"""
+    from_fact: str  # ID первого факта
+    to_fact: str    # ID второго факта
+    connection_type: str = "CONTRADICTS"  # CONTRADICTS или REVEALS
+    reason: str = ""  # Почему связаны
+
+
+class RedHerring(BaseModel):
+    """Ложный след — подозрительная тайна, не связанная с убийством"""
+    character_name: str
+    suspicious_secret: str  # Что выглядит подозрительно
+    actual_truth: str       # Что это на самом деле (не убийство)
+
+
 class SuggestionData(BaseModel):
     logic_text: str
     defense_text: str
     bluff_text: str
+
+
+class BotEmotion(BaseModel):
+    """Эмоциональное состояние бота, влияющее на поведение"""
+    fear: float = 0.0          # Страх (растёт при обвинении против бота)
+    aggression: float = 0.0     # Агрессия (растёт при противоречиях)
+    confidence: float = 0.5     # Уверенность (падает при вскрытии улик против)
+
+
+class BotState(BaseModel):
+    """Состояние бота, которое сохраняется между ходами"""
+    made_statements: List[str] = Field(default_factory=list)  # Что уже говорил
+    accused_others: List[str] = Field(default_factory=list)   # Кого обвинял
+    revealed_facts: List[str] = Field(default_factory=list)   # Какие факты вскрыл
+    suspicion_map: Dict[str, float] = Field(default_factory=dict)  # Кого подозревает (имя -> уровень)
+    relations: Dict[str, str] = Field(default_factory=dict)   # Отношения: имя -> "ally"/"enemy"
+    emotion: BotEmotion = Field(default_factory=BotEmotion)
 
 
 class DetectivePlayerProfile(BaseModel):
@@ -57,6 +89,9 @@ class DetectivePlayerProfile(BaseModel):
     inventory: List[str] = Field(default_factory=list)
     published_facts_count: int = 0
     last_suggestions: Optional[SuggestionData] = None
+    
+    # Состояние для ботов (используется только для ботов)
+    bot_state: Optional[BotState] = None
 
 
 class DetectiveScenario(BaseModel):
@@ -77,6 +112,8 @@ class DetectiveScenario(BaseModel):
     timeline_truth: str = ""
 
     all_facts: Dict[str, Fact] = Field(default_factory=dict)
+    fact_graph: List[FactConnection] = Field(default_factory=list)  # Связи между фактами
+    red_herrings: List[RedHerring] = Field(default_factory=list)  # Ложные следы
 
 
 class DetectiveStateData(BaseModel):

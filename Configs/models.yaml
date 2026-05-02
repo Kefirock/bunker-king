@@ -1,14 +1,18 @@
 player_models:
+
+  #cerebras
   - provider: "cerebras"
-    model_id: "llama-3.3-70b"
+    model_id: "llama3.1-8b"
+  - provider: "cerebras"
+    model_id: "qwen-3-235b-a22b-instruct-2507"
+
+  #groq
   - provider: "groq"
-    model_id: "openai/gpt-oss-20b" 
+    model_id: "openai/gpt-oss-20b"
   - provider: "groq"
     model_id: "qwen/qwen3-32b"
   - provider: "groq"
     model_id: "meta-llama/llama-4-scout-17b-16e-instruct"
-  - provider: "cerebras"
-    model_id: "qwen-3-32b"
 
 director_models:
   # Самая мощная для генерации сценария (Cerebras Preview)

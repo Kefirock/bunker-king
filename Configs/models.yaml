@@ -2,30 +2,28 @@ player_models:
   - provider: "cerebras"
     model_id: "llama-3.3-70b"
   - provider: "groq"
-    model_id: "qwen/qwen3-32b"
-  - provider: "cerebras"
+    model_id: "gpt-oss-20b"
+  - provider: "groq"
     model_id: "qwen-3-32b"
   - provider: "groq"
-    model_id: "meta-llama/llama-4-maverick-17b-128e-instruct"
-  - provider: "groq"
-    model_id: "meta-llama/llama-4-scout-17b-16e-instruct"
-  - provider: "groq"
-    model_id: "moonshotai/kimi-k2-instruct-0905"
-  - provider: "groq"
-    model_id: "moonshotai/kimi-k2-instruct"
+    model_id: "llama-4-scout"
+  - provider: "cerebras"
+    model_id: "qwen-3-32b"
 
 director_models:
-
+  # Самая мощная для генерации сценария (Cerebras Preview)
   - provider: "cerebras"
-    model_id: "llama3.1-8b"
+    model_id: "qwen-3-235b-a22b-instruct-2507"
+  # Основной логический центр (Groq)
   - provider: "groq"
-    model_id: "qwen/qwen3-32b"
-  - provider: "cerebras"
-    model_id: "qwen-3-32b"
+    model_id: "gpt-oss-120b"
+  # Продвинутая модель для контроля процесса
+  - provider: "groq"
+    model_id: "llama-4-scout"
 
 disabled_directors:
-  - provider: "groq"
-    model_id: "llama-3.3-70b-versatile"
+  - provider: "cerebras"
+    model_id: "llama3.1-8b" # Слишком слабая для Директора по новым меркам
 
 disabled_models:
   - provider: "groq"

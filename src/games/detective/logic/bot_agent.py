@@ -124,19 +124,34 @@ class DetectiveBotAgent:
         if fact_id:
             state.revealed_facts.append(fact_id)
     
-    def _compress_history(self, history: List[str], max_items: int = 8) -> str:
-        """Сжать историю, сохранив ключевые моменты"""
+    def _compress_history(
+        self,
+        history: List[str],
+        bot_char_name: str,
+        max_items: int = 8
+    ) -> List[Dict[str, str]]:
+        """
+        Сжатая история как массив сообщений для LLM.
+        Приоритет: сообщения с упоминанием бота + последние общие.
+        """
+        if not history:
+            return []
+
         if len(history) <= max_items:
-            return "\n".join(history)
-        
-        # Берём первые и последние сообщения + случайные из середины
-        compressed = history[:2] + history[-2:]
-        import random
-        if len(history) > 4:
-            middle = random.sample(history[2:-2], min(4, len(history) - 4))
-            compressed = history[:2] + middle + history[-2:]
-        
-        return "\n".join(compressed)
+            selected = history
+        else:
+            # Разделяем на две группы
+            mentions = [h for h in history if bot_char_name.lower() in h.lower()]
+            others = [h for h in history if bot_char_name.lower() not in h.lower()]
+
+            # Берём последние из каждой группы
+            n_mentions = min(4, len(mentions))
+            n_others = min(max_items - n_mentions, len(others))
+
+            selected = mentions[-n_mentions:] + others[-n_others:]
+
+        # Формируем массив messages
+        return [{"role": "user", "content": msg} for msg in selected]
 
     async def make_turn(self,
                         bot: BasePlayer,
@@ -201,10 +216,8 @@ class DetectiveBotAgent:
         cause_to_show = scenario_data.get("apparent_cause", "Неизвестно")
         murder_method = scenario_data.get("method", "неизвестен")
         
-        # Сжимаем историю для экономии токенов
-        compressed_history = self._compress_history(history)
-
-        prompt = prompt_template.format(
+        # 1. Базовый системный промпт (role-specific, без истории)
+        system_prompt = prompt_template.format(
             name=bot.name,
             tag=prof.tag,
             character_name=prof.character_name,
@@ -222,11 +235,11 @@ class DetectiveBotAgent:
 
             public_facts=pub_str,
             inventory=inv_str,
-            history=compressed_history + "\n" + reaction_instruction,
+            history="",  # История теперь в массиве messages отдельно
             published_count=prof.published_facts_count,
             current_round=current_round,
             max_rounds=max_rounds,
-            
+
             # Новые поля для состояния
             emotion_state=emotion_instruction,
             past_statements=statements_str,
@@ -234,40 +247,93 @@ class DetectiveBotAgent:
             enemies=enemies_str
         )
 
+        # Добавляем реактивную инструкцию если нужно
+        if reaction_instruction:
+            system_prompt += "\n\n" + reaction_instruction
+
+        # 2. Сжатая история как массив
+        history_messages = self._compress_history(history, prof.character_name)
+
+        # 3. Напоминание в конец (role-specific reminder)
+        reminder_key = "killer" if prof.role == RoleType.KILLER else "innocent"
+        try:
+            reminder_template = detective_cfg.prompts["bot_reminders"][reminder_key]
+            reminder_text = reminder_template.format(murder_method=murder_method) if prof.role == RoleType.KILLER else reminder_template
+        except (KeyError, AttributeError):
+            # Fallback если напоминания не настроены
+            reminder_text = "Ты убийца. Отрицай." if prof.role == RoleType.KILLER else "Найди убийцу."
+
+        reminder_msg = {"role": "system", "content": reminder_text}
+
         model = core_cfg.models["player_models"][0]
 
-        try:
-            temp_boost = 0.2 * (current_round / max_rounds)
-            temp = 0.7 + temp_boost
+        # 4. Post-filter с retry
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            # Сборка массива messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                *history_messages,
+                reminder_msg  # последнее — имеет наибольший вес
+            ]
 
-            response = await llm_client.generate(
-                model_config=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temp,
-                json_mode=True,
-                logger=logger
-            )
-            data = llm_client.parse_json(response)
+            try:
+                temp_boost = 0.2 * (current_round / max_rounds)
+                temp = 0.7 + temp_boost
 
-            # Сохраняем заявление бота
-            speech = data.get("speech", "")
-            fact_id = data.get("reveal_fact_id")
-            self._save_statement(bot, speech, fact_id, all_players)
-            
-            # Сохраняем состояние в профиль (для персистентности)
-            prof.bot_state = state
+                response = await llm_client.generate(
+                    model_config=model,
+                    messages=messages,
+                    temperature=temp,
+                    json_mode=True,
+                    logger=logger
+                )
+                data = llm_client.parse_json(response)
 
-            if logger:
-                logger.log_event("BOT_DECISION", f"{bot.name} ({prof.character_name}) acted", {
-                    **data, 
-                    "emotion": state.emotion.dict()
-                })
+                speech = data.get("speech", "")
 
-            return data
-        except Exception as e:
-            print(f"Bot Error {bot.name}: {e}")
-            if logger: logger.log_event("BOT_ERROR", f"Error: {e}")
-            return {"speech": "...", "reveal_fact_id": None}
+                # Пост-фильтр для убийцы
+                if prof.role == RoleType.KILLER:
+                    stop_words = ["признаюсь", "я убил", "моя вина", "это сделал я", "виноват"]
+                    detected = [w for w in stop_words if w in speech.lower()]
+
+                    if detected and attempt < max_retries:
+                        # Retry с safety промптом
+                        try:
+                            retry_template = detective_cfg.prompts["bot_safety_retry"]["system"]
+                            retry_prompt = retry_template.format(detected_words=", ".join(detected))
+                        except (KeyError, AttributeError):
+                            retry_prompt = f"🚨 ОШИБКА! Ты использовал: {', '.join(detected)}. Ты УБИЙЦА! НИКОГДА не признавайся! Перепиши полностью с отрицанием."
+
+                        messages.append({"role": "system", "content": retry_prompt})
+                        if logger:
+                            logger.log_event("BOT_SAFETY_RETRY", f"{bot.name} detected stop-words: {detected}")
+                        continue  # повторяем generate
+
+                # Если дошли сюда — всё ок, выходим из retry loop
+                break
+
+            except Exception as e:
+                print(f"Bot Error {bot.name}: {e}")
+                if logger:
+                    logger.log_event("BOT_ERROR", f"Error: {e}")
+                return {"speech": "...", "reveal_fact_id": None}
+
+        # Сохраняем заявление бота
+        speech = data.get("speech", "")
+        fact_id = data.get("reveal_fact_id")
+        self._save_statement(bot, speech, fact_id, all_players)
+
+        # Сохраняем состояние в профиль (для персистентности)
+        prof.bot_state = state
+
+        if logger:
+            logger.log_event("BOT_DECISION", f"{bot.name} ({prof.character_name}) acted", {
+                **data,
+                "emotion": state.emotion.dict()
+            })
+
+        return data
 
     async def make_vote(self,
                         bot: BasePlayer,

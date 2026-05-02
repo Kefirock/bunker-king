@@ -33,6 +33,7 @@ class Fact(BaseModel):
     type: FactType
     is_public: bool = False
     source_player_id: Optional[int] = None
+    implicates: Optional[str] = None  # Имя персонажа, на которого указывает улика (null для атмосферных)
 
 
 class FactConnection(BaseModel):

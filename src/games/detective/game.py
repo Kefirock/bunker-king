@@ -1,6 +1,6 @@
 import asyncio
 from collections import Counter
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from src.core.abstract_game import GameEngine
 from src.core.schemas import BasePlayer, BaseGameState, GameEvent
@@ -203,6 +203,39 @@ class DetectiveGame(GameEngine):
                 ))
             return events
 
+    def _validate_reveal(self, bot: BasePlayer, fact_id: Optional[str]) -> Optional[str]:
+        """
+        Проверяет, не пытается ли бот вскрыть улику против самого себя.
+        Возвращает fact_id для вскрытия (может быть изменён) или None.
+        """
+        if not fact_id:
+            return None
+
+        scen_data = self.state.shared_data["scenario"]
+        all_facts = scen_data["all_facts"]
+        fact = all_facts.get(fact_id)
+        if not fact:
+            return None
+
+        prof = bot.attributes["detective_profile"]
+        char_name = prof.character_name
+
+        # Проверка: улика указывает на этого бота?
+        if fact.get("implicates") == char_name:
+            # Выбираем безопасную улику из инвентаря
+            safe_facts = [
+                fid for fid in prof.inventory
+                if all_facts.get(fid, {}).get("implicates") != char_name
+                and not all_facts.get(fid, {}).get("is_public")
+            ]
+
+            if safe_facts:
+                return safe_facts[0]  # первую безопасную
+            else:
+                return None  # отменяем вскрытие
+
+        return fact_id  # оригинал безопасен
+
     async def execute_bot_turn(self, bot_id: int, token: str) -> List[GameEvent]:
         bot = next((p for p in self.players if p.id == bot_id), None)
         if not bot: return []
@@ -228,10 +261,15 @@ class DetectiveGame(GameEngine):
         speech = decision.get("speech", "...")
         fact_to_reveal = decision.get("reveal_fact_id")
 
+        # ВАЛИДАЦИЯ: не вскрываем улику против себя
+        validated_fact = self._validate_reveal(bot, fact_to_reveal)
+
         events = []
-        if fact_to_reveal:
-            self.logger.log_event("BOT_ACTION", f"{bot.name} revealed fact {fact_to_reveal}")
-            reveal_events = await self._reveal_fact(bot, fact_to_reveal)
+        if validated_fact:
+            if validated_fact != fact_to_reveal:
+                self.logger.log_event("BOT_REVEAL_CHANGED",
+                    f"{bot.name} wanted {fact_to_reveal}, changed to {validated_fact}")
+            reveal_events = await self._reveal_fact(bot, validated_fact)
             events.extend(reveal_events)
 
         prof = bot.attributes["detective_profile"]

@@ -1,6 +1,6 @@
 import uuid
 import random
-import difflib
+import asyncio
 from typing import List, Tuple, Dict, Any
 from src.core.llm import llm_client
 from src.core.config import core_cfg
@@ -134,13 +134,94 @@ class ScenarioGenerator:
 
         return skeleton
 
+    def _parse_skeleton_info(self, skeleton: str) -> Dict[str, Any]:
+        """Извлекает структурированную информацию из текстового skeleton."""
+        info = {
+            "title": "Детективное дело",
+            "description": "Загадочное убийство...",
+            "victim": "Жертва",
+            "cause": "Неизвестно",
+            "real_cause": "Неизвестно",
+            "apparent_cause": "Остановка сердца",
+            "location": "Особняк",
+            "method": "Неизвестно",
+            "solution": "Убийца ещё не найден",
+            "time_of_death": "23:00"
+        }
+
+        try:
+            # Парсим victim
+            if "ЖЕРТВА:" in skeleton:
+                info["victim"] = skeleton.split("ЖЕРТВА:")[1].split("\n")[0].strip()
+
+            # Парсим method
+            if "СПОСОБ:" in skeleton:
+                info["method"] = skeleton.split("СПОСОБ:")[1].split("\n")[0].strip()
+
+            # Парсим location
+            if "ЛОКАЦИЯ ТЕЛА:" in skeleton:
+                info["location"] = skeleton.split("ЛОКАЦИЯ ТЕЛА:")[1].split("\n")[0].strip()
+
+            # Парсим setting для title
+            if "СЕТТИНГ:" in skeleton:
+                setting = skeleton.split("СЕТТИНГ:")[1].split("\n")[0].strip()
+                info["title"] = f"Дело в {setting}"
+                info["description"] = f"Загадочное убийство произошло в {setting}."
+
+            info["real_cause"] = info["method"]
+            info["cause"] = info["method"]
+
+        except Exception:
+            pass  # Используем defaults
+
+        return info
+
+    def _extract_alibi_for_index(self, skeleton: str, index: int) -> str:
+        """Извлекает алиби для персонажа по индексу из skeleton."""
+        try:
+            lines = skeleton.split("\n")
+            for line in lines:
+                if f"Персонаж #{index + 1}" in line and "был" in line.lower():
+                    return line.split("в локации")[-1].strip("'").strip() if "в локации" in line else "Неизвестно"
+        except Exception:
+            pass
+        return "Неизвестно"
+
+    def _extract_markers(self, skeleton: str) -> List[str]:
+        """Извлекает маркеры/следы из skeleton для каждого персонажа."""
+        markers = ["Нервозность", "Пятно", "Царапина", "Запах", "Шрам"]
+        try:
+            lines = skeleton.split("\n")
+            found_markers = []
+            for line in lines:
+                if "след:" in line.lower():
+                    marker_text = line.split("след:")[-1].strip()
+                    found_markers.append(marker_text)
+
+            # Если нашли маркеры, используем их, иначе defaults
+            if found_markers:
+                # Заполняем до 5
+                while len(found_markers) < 5:
+                    found_markers.append(markers[len(found_markers) % len(markers)])
+                return found_markers[:5]
+        except Exception:
+            pass
+        return markers
+
     async def generate(self, player_names: List[str], logger=None) -> Tuple[
         DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
+        """
+        Новый gather pipeline:
+        1. Скелет сценария
+        2. Параллельная генерация 5 легенд (gather)
+        3. Распределение implicate_targets
+        4. Параллельная генерация 5 улик (gather)
+        5. Сборка без difflib
+        """
         count = len(player_names)
         model = core_cfg.models["player_models"][0]
-        max_attempts = 3
 
-        # ШАГ 0
+        # ШАГ 0: Скелет
         try:
             plot_skeleton = self._build_advanced_skeleton(count)
         except Exception as e:
@@ -149,107 +230,254 @@ class ScenarioGenerator:
         if logger:
             logger.log_event("DIRECTOR_MODE", "Skeleton assembled", {"skeleton": plot_skeleton})
 
-        # ШАГ 1
-        master_prompt = detective_cfg.prompts["scenario_master"]["system"].format(
-            player_count=count,
-            plot_skeleton=plot_skeleton
-        )
+        # Парсим данные из skeleton для структурированной информации
+        scenario_info = self._parse_skeleton_info(plot_skeleton)
+        scenario_info["player_names"] = player_names
 
-        scenario_data = None
+        # Подготавливаем role_data для каждого персонажа
+        # По логике skeleton: 0=убийца, 1=вторичная цель, остальные=невиновные
+        role_data_list = []
+        for i, name in enumerate(player_names):
+            role = "KILLER" if i == 0 else "INNOCENT"
+            tag = "Подозреваемый" if i == 1 else "Гость"
+            is_finder = (i == 1)  # Второй находит тело
+            alibi_loc = self._extract_alibi_for_index(plot_skeleton, i)
+            secret = "Убийство" if i == 0 else ("Вторичная цель" if i == 1 else "Личная тайна")
 
-        if logger: logger.log_event("GEN_STEP_1", "Generating Master Scenario")
+            role_data_list.append({
+                "character_name": name,
+                "role": role,
+                "tag": tag,
+                "is_finder": is_finder,
+                "alibi_location": alibi_loc,
+                "secret_objective": secret
+            })
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                print(f"🧠 Шаг 1: Сюжет ({attempt}/{max_attempts})...")
-                response = await llm_client.generate(
-                    model_config=model,
-                    messages=[{"role": "system", "content": master_prompt}],
-                    temperature=0.85,
-                    json_mode=True
+        all_names = ", ".join(player_names)
+
+        # ШАГ 1: Параллельная генерация 5 легенд (gather)
+        if logger:
+            logger.log_event("GEN_STEP_1", "Generating Legends (gather)")
+
+        print(f"🧠 Шаг 1: Генерация {count} легенд параллельно...")
+        legend_tasks = [
+            self._generate_legend(role_data, all_names, plot_skeleton, model)
+            for role_data in role_data_list
+        ]
+        legends = await asyncio.gather(*legend_tasks, return_exceptions=True)
+
+        # Обработка ошибок в легендах
+        valid_legends = []
+        for i, result in enumerate(legends):
+            if isinstance(result, Exception):
+                print(f"⚠️ Legend error for {player_names[i]}: {result}")
+                valid_legends.append({
+                    "character_name": player_names[i],
+                    "tag": "Гость",
+                    "legend": f"Я {player_names[i]}, оказался здесь случайно.",
+                    "secret": "Личная тайна"
+                })
+            else:
+                valid_legends.append(result)
+
+        legends = valid_legends
+
+        # ШАГ 2: Распределение implicate_targets (эвристика противоречий)
+        implicate_targets = self._assign_implicate_targets(player_names, {"roles": role_data_list})
+
+        # ШАГ 3: Параллельная генерация 5 улик (gather)
+        if logger:
+            logger.log_event("GEN_STEP_2", "Generating Facts (gather)")
+
+        print(f"🧠 Шаг 2: Генерация {count}×5 улик параллельно...")
+
+        # Извлекаем маркеры из skeleton
+        markers = self._extract_markers(plot_skeleton)
+
+        fact_tasks = []
+        for i, char_name in enumerate(player_names):
+            legend_data = legends[i]
+            marker = markers[i] if i < len(markers) else "Неизвестный след"
+            role = "KILLER" if i == 0 else "INNOCENT"
+
+            fact_tasks.append(
+                self._generate_facts_for_character(
+                    char_name=char_name,
+                    legend_data=legend_data,
+                    skeleton=plot_skeleton,
+                    implicate_target=implicate_targets[i],
+                    role=role,
+                    marker=marker,
+                    scenario_info=scenario_info,
+                    model=model
                 )
-                data = llm_client.parse_json(response)
-
-                required_fields = ["roles", "victim", "solution"]
-                if not data or any(f not in data for f in required_fields) or len(data["roles"]) < count:
-                    print("⚠️ Шаг 1: Ошибка структуры.")
-                    continue
-
-                scenario_data = data
-                break
-            except Exception as e:
-                print(f"⚠️ Шаг 1 Ошибка: {e}")
-                continue
-
-        if not scenario_data:
-            raise ScenarioGenerationError("Не удалось сгенерировать сюжет.")
-
-        # ШАГ 2
-        roles_desc = []
-        expected_chars = []
-        for r in scenario_data["roles"]:
-            char_name = r.get('character_name', 'Unknown')
-            tag = r.get('tag', 'Гость')
-
-            # SAFETY FILTER: Убираем спойлеры из тегов
-            forbidden_tags = ["KILLER", "MURDERER", "УБИЙЦА", "LOVER", "ЛЮБОВНИК", "THIEF", "ВОР"]
-            if any(bad in tag.upper() for bad in forbidden_tags):
-                tag = "Гость"
-                r["tag"] = tag  # Обновляем в данных
-
-            expected_chars.append(char_name)
-            roles_desc.append(
-                f"- Имя: {char_name} ({tag})\n"
-                f"  Роль: {r.get('role')}\n"
-                f"  Легенда: {r.get('legend')}\n"
-                f"  Секрет: {r.get('secret')}"
             )
 
-        timeline_info = scenario_data.get("timeline_truth", plot_skeleton)
+        facts_results = await asyncio.gather(*fact_tasks, return_exceptions=True)
 
-        facts_prompt = detective_cfg.prompts["fact_generator"]["system"].format(
-            victim=scenario_data.get("victim"),
-            # Берем истинную причину для генератора фактов, чтобы он мог создавать улики
-            cause=scenario_data.get("cause_of_death", "Неизвестно"),
-            location=scenario_data.get("location_of_body"),
-            solution=scenario_data.get("solution"),
-            timeline=timeline_info,
-            characters_list="\n".join(roles_desc)
+        # Обработка ошибок в фактах
+        valid_facts = []
+        for i, result in enumerate(facts_results):
+            if isinstance(result, Exception):
+                print(f"⚠️ Facts error for {player_names[i]}: {result}")
+                # Fallback факты
+                valid_facts.append([
+                    {"text": "Я заметил что-то странное...", "keyword": "Подозрение", "type": "TESTIMONY", "is_plot": True, "implicates": implicate_targets[i]},
+                    {"text": "В комнате было что-то не так.", "keyword": "Деталь", "type": "PHYSICAL", "is_plot": True, "implicates": None},
+                    {"text": "Я слышал странный звук.", "keyword": "Звук", "type": "TESTIMONY", "is_plot": False, "implicates": None},
+                    {"text": "Воздух был тяжелым.", "keyword": "Атмосфера", "type": "TESTIMONY", "is_plot": False, "implicates": None},
+                    {"text": "Я ничего не понимаю.", "keyword": "Смятение", "type": "TESTIMONY", "is_plot": False, "implicates": None}
+                ])
+            else:
+                valid_facts.append(result)
+
+        facts_results = valid_facts
+
+        # ШАГ 4: Сборка объектов (без difflib)
+        if logger:
+            logger.log_event("GEN_STEP_3", "Assembling game objects")
+
+        return self._assemble_from_gather(legends, facts_results, plot_skeleton, player_names, scenario_info)
+
+    def _assign_implicate_targets(self, player_names: List[str], skeleton_data: Dict) -> List[str]:
+        """
+        Алгоритмическое распределение 'на кого указывает улика' до генерации.
+        Возвращает список имен целей для каждого персонажа (индекс совпадает с player_names).
+        """
+        count = len(player_names)
+        targets = [None] * count
+
+        # Определяем роли из skeleton_data (если доступно) или используем эвристику
+        roles = skeleton_data.get("roles", [])
+        role_map = {}
+        for i, name in enumerate(player_names):
+            role_map[name] = "INNOCENT"
+
+        # Первый игрок — убийца (по логике _build_advanced_skeleton)
+        if count > 0:
+            role_map[player_names[0]] = "KILLER"
+
+        # Ищем невиновного с вторичной целью (обычно второй в списке)
+        secondary_target = player_names[1] if count > 1 else None
+
+        # Убийца должен иметь хотя бы 1 улику, указывающую на невиновного
+        killer_idx = 0
+        innocent_indices = [i for i in range(count) if i != killer_idx]
+
+        if innocent_indices:
+            # Убийца указывает на случайного невиновного
+            targets[killer_idx] = player_names[random.choice(innocent_indices)]
+
+        # Невиновный с вторичной целью (если есть) должен иметь улику на убийцу
+        if secondary_target and count > 1:
+            targets[1] = player_names[killer_idx]
+
+        # Остальные — случайное распределение
+        for i in range(count):
+            if targets[i] is None:
+                others = [n for j, n in enumerate(player_names) if j != i]
+                targets[i] = random.choice(others) if others else player_names[0]
+
+        return targets
+
+    async def _generate_legend(self, role_data: Dict, all_names: str, skeleton: str, model: Dict) -> Dict:
+        """
+        Генерация легенды для одного персонажа.
+        Вызывается параллельно через gather.
+        """
+        prompt = detective_cfg.prompts["character_legend"]["system"].format(
+            setting=skeleton.split("СЕТТИНГ:")[1].split("\n")[0].strip() if "СЕТТИНГ:" in skeleton else "Особняк",
+            tech_level=skeleton.split("ЭПОХА:")[1].split("\n")[0].strip() if "ЭПОХА:" in skeleton else "1920s",
+            victim=skeleton.split("ЖЕРТВА:")[1].split("\n")[0].strip() if "ЖЕРТВА:" in skeleton else "Хозяин",
+            method=skeleton.split("СПОСОБ:")[1].split("\n")[0].strip() if "СПОСОБ:" in skeleton else "Удар",
+            time_of_death="23:00",
+            location=skeleton.split("ЛОКАЦИЯ ТЕЛА:")[1].split("\n")[0].strip() if "ЛОКАЦИЯ ТЕЛА:" in skeleton else "Кабинет",
+            all_characters_list=all_names,
+            character_name=role_data.get("character_name", "Гость"),
+            role=role_data.get("role", "INNOCENT"),
+            tag=role_data.get("tag", "Гость"),
+            is_finder=str(role_data.get("is_finder", False)).lower(),
+            alibi_location=role_data.get("alibi_location", "Неизвестно"),
+            secret_objective=role_data.get("secret_objective", "Скрыть тайну")
         )
 
-        facts_data_map = {}
+        try:
+            response = await llm_client.generate(
+                model_config=model,
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.8,
+                json_mode=True
+            )
+            data = llm_client.parse_json(response)
 
-        if logger: logger.log_event("GEN_STEP_2", "Generating Facts")
+            # Валидация обязательных полей
+            required = ["character_name", "tag", "legend", "secret"]
+            if not data or any(f not in data for f in required):
+                raise ScenarioGenerationError(f"Invalid legend JSON: {data}")
 
-        for attempt in range(1, 3):
-            try:
-                print(f"🧠 Шаг 2: Улики (Попытка {attempt})...")
-                response_facts = await llm_client.generate(
-                    model_config=model,
-                    messages=[{"role": "system", "content": facts_prompt}],
-                    temperature=0.6,
-                    json_mode=True
-                )
-                parsed_facts = llm_client.parse_json(response_facts)
+            return data
+        except Exception as e:
+            print(f"⚠️ Legend generation error: {e}")
+            # Fallback
+            return {
+                "character_name": role_data.get("character_name", "Гость"),
+                "tag": role_data.get("tag", "Гость"),
+                "legend": f"Я {role_data.get('character_name', 'гость')}, оказался здесь по несчастливой случайности.",
+                "secret": role_data.get("secret_objective", "У меня есть тайна.")
+            }
 
-                temp_map = {}
-                for item in parsed_facts.get("facts_by_character", []):
-                    c_name = item.get("character_name", "").strip()
-                    if c_name:
-                        temp_map[c_name] = item.get("facts", [])
+    async def _generate_facts_for_character(
+        self,
+        char_name: str,
+        legend_data: Dict,
+        skeleton: str,
+        implicate_target: str,
+        role: str,
+        marker: str,
+        scenario_info: Dict,
+        model: Dict
+    ) -> List[Dict]:
+        """
+        Генерация 5 улик для одного персонажа.
+        Вызывается параллельно через gather.
+        """
+        prompt = detective_cfg.prompts["character_facts"]["system"].format(
+            victim=scenario_info.get("victim", "Хозяин"),
+            cause=scenario_info.get("cause", "Неизвестно"),
+            location=scenario_info.get("location", "Особняк"),
+            solution=scenario_info.get("solution", "Unknown"),
+            timeline=scenario_info.get("timeline", ""),
+            character_name=char_name,
+            role=role,
+            legend=legend_data.get("legend", ""),
+            marker=marker,
+            implicate_target_1=implicate_target
+        )
 
-                valid_count = 0
-                for char in expected_chars:
-                    if char in temp_map or any(char in k for k in temp_map.keys()):
-                        valid_count += 1
+        try:
+            response = await llm_client.generate(
+                model_config=model,
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.6,
+                json_mode=True
+            )
+            data = llm_client.parse_json(response)
 
-                if valid_count >= len(expected_chars):
-                    facts_data_map = temp_map
-                    break
-            except Exception as e:
-                print(f"⚠️ Ошибка генерации фактов: {e}")
+            facts = data.get("facts", [])
+            if len(facts) < 5:
+                raise ScenarioGenerationError(f"Only {len(facts)} facts generated, need 5")
 
-        return self._assemble_game_objects(scenario_data, facts_data_map, player_names, plot_skeleton)
+            return facts[:5]
+        except Exception as e:
+            print(f"⚠️ Facts generation error for {char_name}: {e}")
+            # Fallback факты
+            return [
+                {"text": f"Я заметил кое-что странное...", "keyword": "Подозрение", "type": "TESTIMONY", "is_plot": True, "implicates": implicate_target},
+                {"text": f"В комнате было что-то не так.", "keyword": "Деталь", "type": "PHYSICAL", "is_plot": True, "implicates": None},
+                {"text": f"Я слышал странный звук.", "keyword": "Звук", "type": "TESTIMONY", "is_plot": False, "implicates": None},
+                {"text": f"Воздух был тяжелым.", "keyword": "Атмосфера", "type": "TESTIMONY", "is_plot": False, "implicates": None},
+                {"text": f"Я ничего не понимаю.", "keyword": "Смятение", "type": "TESTIMONY", "is_plot": False, "implicates": None}
+            ]
 
     def _assemble_game_objects(self,
                                scen_data: Dict,
@@ -441,5 +669,91 @@ class ScenarioGenerator:
                 reason=reason
             )
             contradictions.append(conn)
-        
+
         return contradictions
+
+    def _assemble_from_gather(
+        self,
+        legends: List[Dict],
+        facts_results: List[List[Dict]],
+        skeleton: str,
+        player_names: List[str],
+        scenario_info: Dict
+    ) -> Tuple[DetectiveScenario, Dict[str, DetectivePlayerProfile]]:
+        """
+        Сборка объектов из результатов gather pipeline.
+        НЕ использует difflib — соответствие по индексу.
+        """
+        # Создаём сценарий из skeleton и scenario_info
+        scenario = DetectiveScenario(
+            title=scenario_info.get("title", "Дело без названия"),
+            description=scenario_info.get("description", "..."),
+            victim_name=scenario_info.get("victim", "Неизвестный"),
+            time_of_death=scenario_info.get("time_of_death", "Неизвестно"),
+            real_cause=scenario_info.get("real_cause", "Неизвестно"),
+            apparent_cause=scenario_info.get("apparent_cause", "Остановка сердца (причина неясна)"),
+            location_of_body=scenario_info.get("location", "Неизвестно"),
+            murder_method=scenario_info.get("method", "Unknown"),
+            true_solution=scenario_info.get("solution", "Unknown"),
+            timeline_truth=skeleton,
+            fact_graph=[],  # Будет заполнено после генерации фактов
+            red_herrings=[]
+        )
+
+        player_profiles: Dict[str, DetectivePlayerProfile] = {}
+
+        # Собираем профили и факты по индексу (соответствие gather)
+        for i, real_name in enumerate(player_names):
+            legend_data = legends[i] if i < len(legends) else {}
+            character_facts = facts_results[i] if i < len(facts_results) else []
+
+            char_name = legend_data.get("character_name", f"Персонаж {i + 1}")
+            tag = legend_data.get("tag", "Гость")
+
+            # Определяем роль (первый — убийца по логике skeleton)
+            role_enum = RoleType.KILLER if i == 0 else RoleType.INNOCENT
+
+            profile = DetectivePlayerProfile(
+                character_name=char_name,
+                tag=tag,
+                legend=legend_data.get("legend", ""),
+                role=role_enum,
+                secret_objective=legend_data.get("secret", ""),
+                is_finder=legend_data.get("is_finder", False)
+            )
+
+            # Создаём факты из gather результатов
+            for f_data in character_facts[:5]:  # Максимум 5 фактов
+                fid = str(uuid.uuid4())[:8]
+                ftype_str = str(f_data.get("type", "TESTIMONY")).upper()
+                if "PHYSICAL" in ftype_str:
+                    ftype = FactType.PHYSICAL
+                elif "MOTIVE" in ftype_str:
+                    ftype = FactType.MOTIVE
+                elif "ALIBI" in ftype_str:
+                    ftype = FactType.ALIBI
+                else:
+                    ftype = FactType.TESTIMONY
+
+                keyword = f_data.get("keyword", "Улика")
+                if len(keyword) > 25:
+                    keyword = keyword[:25] + "."
+
+                fact = Fact(
+                    id=fid,
+                    text=f_data.get("text", "???"),
+                    keyword=keyword,
+                    type=ftype,
+                    is_public=False,
+                    implicates=f_data.get("implicates")  # ← НОВОЕ ПОЛЕ из JSON
+                )
+
+                scenario.all_facts[fid] = fact
+                profile.inventory.append(fid)
+
+            player_profiles[real_name] = profile
+
+        # Генерация противоречий после создания всех фактов
+        scenario.fact_graph = self._generate_fact_contractions(scenario.all_facts)
+
+        return scenario, player_profiles

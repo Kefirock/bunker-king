@@ -2,11 +2,11 @@ player_models:
   - provider: "cerebras"
     model_id: "llama-3.3-70b"
   - provider: "groq"
-    model_id: "gpt-oss-20b"
+    model_id: "openai/gpt-oss-20b" 
   - provider: "groq"
-    model_id: "qwen-3-32b"
+    model_id: "qwen/qwen3-32b"
   - provider: "groq"
-    model_id: "llama-4-scout"
+    model_id: "meta-llama/llama-4-scout-17b-16e-instruct"
   - provider: "cerebras"
     model_id: "qwen-3-32b"
 
@@ -14,12 +14,14 @@ director_models:
   # Самая мощная для генерации сценария (Cerebras Preview)
   - provider: "cerebras"
     model_id: "qwen-3-235b-a22b-instruct-2507"
+
   # Основной логический центр (Groq)
   - provider: "groq"
-    model_id: "gpt-oss-120b"
+    model_id: "openai/gpt-oss-120b"
+
   # Продвинутая модель для контроля процесса
   - provider: "groq"
-    model_id: "llama-4-scout"
+    model_id: "meta-llama/llama-4-scout-17b-16e-instruct"
 
 disabled_directors:
   - provider: "cerebras"

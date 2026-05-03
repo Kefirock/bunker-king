@@ -221,6 +221,7 @@ class DetectiveBotAgent:
             name=bot.name,
             tag=prof.tag,
             character_name=prof.character_name,
+            role="KILLER" if prof.role == RoleType.KILLER else "INNOCENT",
             legend=prof.legend,
             objective=prof.secret_objective,
             secret=prof.secret_objective,  # Для убийцы — его тайна
@@ -231,9 +232,12 @@ class DetectiveBotAgent:
             scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
             cause=cause_to_show,
+            apparent_cause=cause_to_show,
+            location=scenario_data.get("location_of_body", "Неизвестно"),
             murder_method=murder_method,
 
             public_facts=pub_str,
+            fact_list=inv_str,
             inventory=inv_str,
             history="",  # История теперь в массиве messages отдельно
             published_count=prof.published_facts_count,
@@ -367,11 +371,14 @@ class DetectiveBotAgent:
 
         prompt = prompt_template.format(
             character_name=prof.character_name,
+            tag=prof.tag,
             scenario_title=scenario_data.get("title", ""),
             victim=scenario_data.get("victim_name", "Неизвестный"),
             public_facts=pub_str,
             history="\n".join(history[-15:]),
-            candidates=cand_str
+            candidates=cand_str,
+            player_list=cand_str,
+            role="KILLER" if prof.role == RoleType.KILLER else "INNOCENT"
         )
 
         model = core_cfg.models["player_models"][0]
